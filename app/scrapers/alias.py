@@ -65,20 +65,23 @@ class AliasClient:
         inner = data.get("data")
         return inner if isinstance(inner, dict) else (data if isinstance(data, dict) else None)
 
-    def get_sales_last_7_days(
+    def get_recent_sales(
         self,
         catalog_id: str,
         size: Optional[str] = None,
         region_id: Optional[str] = None,
-    ) -> int:
+    ) -> Optional[List[Dict[str, Any]]]:
         """
-        Count marketplace sales in the last 7 days for a catalog item.
+        Fetch individual marketplace sale events in the last 7 days for a
+        catalog item, as a list of {"price": float|None, "sale_date": datetime}.
 
         Uses Pattern 1 (catalog-level) from the recent_sales endpoint so that a
         single call covers all sizes — giving a reliable overall demand signal.
         With size supplied it narrows to that specific variant.
 
-        Returns 0 on any error.
+        Returns None (not []) when the request failed or the SKU isn't in
+        Alias's catalog — "unknown", not "confirmed zero sales". Only a
+        successful response with a genuinely empty sales list returns [].
         """
         params: Dict[str, Any] = {
             "catalog_id": catalog_id,
@@ -92,27 +95,40 @@ class AliasClient:
 
         data = self._get_json(f"{BASE}/api/v1/pricing_insights/recent_sales", params)
         if not data:
-            return 0
+            return None
 
         sales = data.get("data", [])
         if not isinstance(sales, list):
-            return 0
+            return None
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-        count = 0
+        events: List[Dict[str, Any]] = []
         for sale in sales:
             sale_date = _parse_sale_date(sale)
             if sale_date is None:
                 # No date info — count it conservatively (can't tell if within window)
-                count += 1
+                events.append({"price": _parse_sale_price(sale), "sale_date": None,
+                               "size": _parse_sale_size(sale)})
                 continue
             if sale_date >= cutoff:
-                count += 1
+                events.append({"price": _parse_sale_price(sale), "sale_date": sale_date,
+                               "size": _parse_sale_size(sale)})
             else:
                 # Results are newest-first; once we pass the 7-day cutoff we're done
                 break
 
-        return count
+        return events
+
+    def get_sales_last_7_days(
+        self,
+        catalog_id: str,
+        size: Optional[str] = None,
+        region_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """Count marketplace sales in the last 7 days for a catalog item.
+        Returns None (unknown) if the request failed, rather than 0."""
+        sales = self.get_recent_sales(catalog_id, size=size, region_id=region_id)
+        return len(sales) if sales is not None else None
 
     def extract_lowest_ask(self, availability: Dict) -> Optional[float]:
         """Pull the lowest listing price out of a get_availability() result."""
@@ -184,6 +200,31 @@ _DATE_FIELDS = (
     "sold_at", "sale_date", "created_at", "date",
     "transaction_date", "saleDate", "soldAt", "createdAt",
 )
+
+# Field names Alias might use for the sale price across API versions
+_PRICE_FIELDS = (
+    "price", "sale_price", "sold_price", "amount",
+    "salePrice", "soldPrice",
+)
+
+# Field names Alias might use for the sale's size across API versions
+_SIZE_FIELDS = ("size", "us_size", "usSize", "sizeLabel")
+
+
+def _parse_sale_price(sale: Dict) -> Optional[float]:
+    for field in _PRICE_FIELDS:
+        val = sale.get(field)
+        if val is not None:
+            return _to_float(val)
+    return None
+
+
+def _parse_sale_size(sale: Dict) -> Optional[str]:
+    for field in _SIZE_FIELDS:
+        val = sale.get(field)
+        if val is not None:
+            return str(val)
+    return None
 
 
 def _parse_sale_date(sale: Dict) -> Optional[datetime]:

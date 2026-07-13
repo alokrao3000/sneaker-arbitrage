@@ -11,6 +11,7 @@ from app.services.scheduler import start_scheduler, stop_scheduler
 from app.services.supplier_loader import load_suppliers
 from app.api.routes.opportunities import router as opp_router
 from app.api.routes.jobs import router as jobs_router
+from app.api.routes.sku import router as sku_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +56,7 @@ app = FastAPI(
 # API routes
 app.include_router(opp_router, prefix="/api/opportunities", tags=["Opportunities"])
 app.include_router(jobs_router, prefix="/api/jobs", tags=["Jobs"])
+app.include_router(sku_router, prefix="/api/sku", tags=["Live SKU Lookup"])
 
 # Serve static files (JS, CSS)
 if STATIC_DIR.exists():

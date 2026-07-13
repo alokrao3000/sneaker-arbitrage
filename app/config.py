@@ -18,5 +18,11 @@ class Settings(BaseSettings):
     kicks_dev_api_key: str = ""
     alias_api_key: str = ""
 
+    browser_headless: bool = True
+    browser_state_dir: str = "data/browser_state"
+    stockx_proxy_url: str = ""
+    goat_proxy_url: str = ""
+    browser_nav_timeout_ms: int = 30000
+
 
 settings = Settings()

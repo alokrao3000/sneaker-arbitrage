@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 
 from app.database import get_db, Opportunity, Supplier
 
@@ -22,7 +22,7 @@ def _opp_to_dict(o: Opportunity) -> dict:
         "listing_price":    float(o.listing_price or 0),
         "payout_price":     float(o.payout_price or 0),
         "roi":              round(float(o.roi or 0), 2),
-        "sales_last_7_days":o.sales_last_7_days or 0,
+        "sales_last_7_days":o.sales_last_7_days,  # null = unknown, not confirmed zero
         "supplier_url":     o.supplier_url,
         "market_url":       o.market_url,
         "found_at":         o.found_at.isoformat() if o.found_at else None,
@@ -44,8 +44,17 @@ def list_opportunities(
     q = db.query(Opportunity).filter(
         Opportunity.is_active == True,
         Opportunity.roi >= min_roi,
-        Opportunity.sales_last_7_days >= min_sales,
     )
+    if min_sales > 0:
+        # NULL means "unknown", not "confirmed zero" — only exclude it when
+        # the caller actually asked for a minimum sales count. The default
+        # (min_sales=0) includes opportunities with no sales data available.
+        q = q.filter(Opportunity.sales_last_7_days >= min_sales)
+    else:
+        q = q.filter(or_(
+            Opportunity.sales_last_7_days >= min_sales,
+            Opportunity.sales_last_7_days.is_(None),
+        ))
 
     if platform:
         q = q.filter(Opportunity.listing_platform == platform.lower())

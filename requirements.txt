@@ -4,6 +4,9 @@ sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 httpx==0.28.1
 playwright==1.49.0
+playwright-stealth==1.0.6
+# playwright-stealth imports pkg_resources, removed from newer setuptools
+setuptools<70
 apscheduler==3.10.4
 pydantic-settings==2.6.1
 python-dotenv==1.0.1

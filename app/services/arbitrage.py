@@ -18,6 +18,7 @@ from typing import List, Optional, Callable
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from playwright.sync_api import sync_playwright
 
 from app.config import settings
 from app.database import (
@@ -27,14 +28,53 @@ from app.database import (
 from app.scrapers.base import ScrapedProduct, rate_limit
 from app.scrapers.shopify import ShopifyScraper
 from app.scrapers.footlocker import FootlockerScraper
-from app.scrapers.kicks_dev import KicksDevClient
-from app.scrapers.stockx import StockXKicksClient, StockXProduct
-from app.scrapers.goat import GoatScraper
+from app.scrapers.browser import BrowserSession, ThreadBoundProxy
+from app.scrapers.stockx_market import StockXBrowserClient, StockXProduct
+from app.scrapers.goat_market import GoatBrowserClient
 from app.scrapers.alias import AliasClient
+from app.services.pricing import classify_opportunity
 
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]   # called with status messages
+
+
+def _make_browser_client(platform: str, client_cls, use_stealth: bool = True):
+    """Build a client whose entire lifecycle (Playwright start, browser
+    launch, every method call, teardown) runs on one dedicated thread — see
+    BrowserSession's module docstring: Playwright's sync API and
+    ShopifyScraper's asyncio.run() calls can't share a thread, and this loop
+    calls both across the same supplier list. Returns (proxy, teardown_fn).
+    """
+    proxy = ThreadBoundProxy()
+    state: dict = {}
+
+    def factory():
+        pw = sync_playwright().start()
+        proxy_url = settings.stockx_proxy_url if platform == "stockx" else settings.goat_proxy_url
+        session = BrowserSession(
+            platform, headless=settings.browser_headless,
+            proxy_url=proxy_url,
+            state_dir=settings.browser_state_dir,
+            nav_timeout_ms=settings.browser_nav_timeout_ms,
+            use_stealth=use_stealth,
+            playwright=pw,
+        )
+        session.start()
+        state["playwright"] = pw
+        state["session"] = session
+        return client_cls(session)
+
+    proxy.setup(factory)
+
+    def teardown():
+        # Playwright objects are bound (via a greenlet fiber) to the thread
+        # that created them — must close/stop on that same worker thread,
+        # not whatever thread calls teardown(), or it raises a greenlet
+        # cross-thread error.
+        proxy.teardown(lambda: (state["session"].close(), state["playwright"].stop()))
+
+    return proxy, teardown
 
 
 # ── Scraper dispatch ──────────────────────────────────────────────────────────
@@ -96,9 +136,13 @@ def run_full_scrape(
         label += f" min_discount={min_discount}%"
     emit(f"Starting scrape — {len(active_suppliers)} active suppliers{label}")
 
-    kicks  = KicksDevClient(settings.kicks_dev_api_key)
-    stockx = StockXKicksClient(kicks)
-    goat   = GoatScraper(kicks)
+    # StockX/GOAT run on their own dedicated worker threads (ThreadBoundProxy)
+    # — Playwright's sync API and ShopifyScraper's asyncio.run() (used below,
+    # same loop) can't share a thread, confirmed live. Each proxy's factory
+    # opens its own Playwright + browser session and keeps them alive there
+    # for the whole run, so cookie/storage-state reuse still works as designed.
+    stockx, _stockx_teardown = _make_browser_client("stockx", StockXBrowserClient)
+    goat, _goat_teardown = _make_browser_client("goat", GoatBrowserClient, use_stealth=False)
     alias: Optional[AliasClient] = None
     if settings.alias_api_key:
         try:
@@ -178,9 +222,8 @@ def run_full_scrape(
             db.commit()
 
     finally:
-        stockx.close()
-        goat.close()
-        kicks.close()
+        _stockx_teardown()   # persists cookies/storage state even on error
+        _goat_teardown()
         if alias:
             alias.close()
 
@@ -198,8 +241,8 @@ def _process_sku(
     db: Session,
     supplier: Supplier,
     product: ScrapedProduct,
-    stockx: StockXKicksClient,
-    goat: GoatScraper,
+    stockx: StockXBrowserClient,
+    goat: GoatBrowserClient,
     alias: Optional[AliasClient],
     emit: Callable,
 ) -> int:
@@ -224,9 +267,9 @@ def _process_sku(
         else:
             emit(f"    [GOAT]   {product.sku} → no data; will try Alias …")
 
-    kicks_dev_found = bool(stockx_data or goat_data)
+    stockx_or_goat_found = bool(stockx_data or goat_data)
 
-    # Persist kicks.dev market prices
+    # Persist StockX/GOAT market prices
     if stockx_data:
         for sz in stockx_data.sizes:
             _upsert_market_price(db, product.sku, "stockx", sz.size,
@@ -242,13 +285,20 @@ def _process_sku(
     db.commit()
 
     # Fetch 7-day sales once per product from Alias (product-level demand signal).
-    # kicks.dev always returns 0 for both StockX and GOAT, so Alias is authoritative.
-    alias_sales_7d = 0
+    # StockX's sales-count source is unconfirmed and GOAT's public site was
+    # confirmed to expose none at all, so Alias is the only possible source —
+    # but as of this session no ALIAS_API_KEY exists, so this stays unknown
+    # (None) rather than a confirmed 0 in the common case. See
+    # app/services/pricing.py's docstring for how None is handled.
+    alias_sales_7d: Optional[int] = None
     if alias:
         try:
-            alias_sales_7d = alias.get_sales_last_7_days(product.sku)
+            recent_sales = alias.get_recent_sales(product.sku)
+            if recent_sales is not None:
+                alias_sales_7d = len(recent_sales)
+                _upsert_sale_records(db, product.sku, "alias", recent_sales)
         except Exception:
-            alias_sales_7d = 0
+            alias_sales_7d = None
         rate_limit(0.5, 1.0)
 
     # Check each in-stock size
@@ -258,8 +308,8 @@ def _process_sku(
             product.sku, avail_size.size, stockx_data, goat_data
         )
 
-        # If kicks.dev had no data for this shoe, try Alias as pricing source
-        if listing_price is None and alias and not kicks_dev_found:
+        # If StockX/GOAT had no data for this shoe, try Alias as pricing source
+        if listing_price is None and alias and not stockx_or_goat_found:
             avail = alias.get_availability(product.sku, size=avail_size.size)
             if avail:
                 listing_price = alias.extract_lowest_ask(avail)
@@ -284,15 +334,17 @@ def _process_sku(
 
         sales_7d = alias_sales_7d
 
-        # ROI calculation
-        cost = _discounted_price(avail_size.price or product.original_price, supplier)
-        payout = listing_price * (1.0 - settings.commission_rate)
-        if cost <= 0:
+        result = classify_opportunity(
+            original_price=float(avail_size.price or product.original_price),
+            discount_percent=float(supplier.discount_percent or 0),
+            listing_price=listing_price,
+            sales_last_7_days=sales_7d,
+        )
+        if not result.is_opportunity:
             continue
-        roi = (payout - cost) / cost * 100.0
-
-        if roi < settings.roi_threshold:
-            continue
+        cost = result.cost
+        payout = result.payout
+        roi = result.roi
 
         # Write opportunity
         _upsert_opportunity(
@@ -312,10 +364,11 @@ def _process_sku(
             market_url=platform_url,
         )
         opps_created += 1
+        sales_label = f"{sales_7d} sales/7d" if sales_7d is not None else "sales/7d unknown"
         emit(
             f"    ✓ {product.name} | {product.sku} | Sz {avail_size.size} | "
             f"${cost:.2f} → ${payout:.2f} payout | ROI {roi:.1f}% | "
-            f"{sales_7d} sales/7d [{platform.upper()}]"
+            f"{sales_label} [{platform.upper()}]"
         )
 
     db.commit()
@@ -323,11 +376,6 @@ def _process_sku(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _discounted_price(original: float, supplier: Supplier) -> float:
-    pct = float(supplier.discount_percent or 0)
-    return original * (1.0 - pct / 100.0)
-
 
 def _best_listing(sku, size, stockx_data, goat_data):
     """Return (platform, listing_price, url, name) for the best available market."""
@@ -400,6 +448,28 @@ def _upsert_supplier_product(db: Session, supplier: Supplier, product: ScrapedPr
             size=size_val,
             in_stock=in_stock,
         ))
+
+
+def _upsert_sale_records(db: Session, sku: str, platform: str, sales: List[dict]):
+    """Persist individual sale events (skips any without a parseable date —
+    sale_date is NOT NULL on the table; those still count toward the
+    aggregate 7-day number via len(), just aren't itemized)."""
+    for sale in sales:
+        sale_date = sale.get("sale_date")
+        if sale_date is None:
+            continue
+        size = sale.get("size") or "ANY"
+        exists = (
+            db.query(SaleRecord)
+            .filter_by(sku=sku, platform=platform, size=size, sale_date=sale_date)
+            .first()
+        )
+        if not exists:
+            db.add(SaleRecord(
+                sku=sku, platform=platform, size=size,
+                sale_price=sale.get("price"), sale_date=sale_date,
+            ))
+    db.commit()
 
 
 def _upsert_market_price(db: Session, sku, platform, size,
