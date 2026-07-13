@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BrickFinder — Dashboard</title>
+  <!-- Bootstrap 5 dark -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" />
+  <!-- DataTables -->
+  <link rel="stylesheet" href="https://cdn.datatables.net/2.0.3/css/dataTables.bootstrap5.min.css" />
+  <!-- Bootstrap Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+
+  <style>
+    :root {
+      --accent: #00e5a0;
+      --accent-dim: #00b37a;
+      --danger: #ff4d4d;
+      --warn: #ffc107;
+      --bg-card: #1a1d23;
+      --bg-row-hover: #22262f;
+    }
+
+    body { background: #12141a; font-family: 'Segoe UI', system-ui, sans-serif; }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #0f1117 0%, #1a1d23 100%);
+      border-bottom: 1px solid #2a2d35;
+      padding: 14px 24px;
+    }
+    .brand { font-size: 1.25rem; font-weight: 700; color: var(--accent); letter-spacing: 0.04em; }
+    .brand span { color: #fff; }
+
+    /* ── Stat cards ── */
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid #2a2d35;
+      border-radius: 10px;
+      padding: 16px 20px;
+    }
+    .stat-label { font-size: .75rem; color: #8b8fa8; text-transform: uppercase; letter-spacing: .08em; }
+    .stat-value { font-size: 1.6rem; font-weight: 700; color: #fff; line-height: 1.1; }
+    .stat-value.green { color: var(--accent); }
+    .stat-value.yellow { color: var(--warn); }
+
+    /* ── Filter bar ── */
+    .filter-bar {
+      background: var(--bg-card);
+      border: 1px solid #2a2d35;
+      border-radius: 10px;
+      padding: 12px 16px;
+    }
+    .filter-bar label { font-size: .75rem; color: #8b8fa8; }
+    .filter-bar .form-control, .filter-bar .form-select {
+      background: #12141a; border-color: #2a2d35; color: #e0e4f0; font-size: .85rem;
+    }
+    .filter-bar .form-control:focus, .filter-bar .form-select:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,229,160,.15);
+    }
+
+    /* ── Table ── */
+    #opps-table_wrapper .dataTables_filter input,
+    #opps-table_wrapper .dataTables_length select {
+      background: #1a1d23; border: 1px solid #2a2d35; color: #e0e4f0;
+      border-radius: 6px; padding: 4px 8px;
+    }
+    #opps-table { font-size: .83rem; }
+    #opps-table thead th {
+      background: #0f1117; color: #8b8fa8;
+      border-bottom: 2px solid #2a2d35;
+      font-size: .7rem; text-transform: uppercase; letter-spacing: .07em;
+      white-space: nowrap;
+    }
+    #opps-table tbody tr { border-bottom: 1px solid #1e212a; }
+    #opps-table tbody tr:hover td { background: var(--bg-row-hover); }
+
+    .roi-high   { color: var(--accent);  font-weight: 700; }
+    .roi-medium { color: var(--warn);    font-weight: 600; }
+    .roi-low    { color: #e0e4f0;        font-weight: 500; }
+
+    .badge-stockx { background: #3b6aff; font-size: .7rem; }
+    .badge-goat   { background: #ff5c00; font-size: .7rem; }
+
+    /* ── Progress panel ── */
+    #progress-panel {
+      background: #0f1117;
+      border: 1px solid #2a2d35;
+      border-radius: 10px;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: .78rem;
+      color: #8b8fa8;
+      height: 220px;
+      overflow-y: auto;
+      padding: 12px;
+      display: none;
+    }
+    #progress-panel .line-ok   { color: var(--accent); }
+    #progress-panel .line-err  { color: var(--danger); }
+    #progress-panel .line-info { color: #e0e4f0; }
+
+    .pulse {
+      display: inline-block; width: 8px; height: 8px;
+      background: var(--accent); border-radius: 50%;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
+
+    /* ── Misc ── */
+    .btn-run {
+      background: var(--accent); color: #0f1117; font-weight: 700;
+      border: none; border-radius: 8px; padding: 8px 18px;
+    }
+    .btn-run:hover { background: var(--accent-dim); color: #0f1117; }
+    .btn-run:disabled { opacity: .5; cursor: not-allowed; }
+
+    .last-updated { font-size: .75rem; color: #8b8fa8; }
+    a.table-link  { color: #6c9eff; text-decoration: none; }
+    a.table-link:hover { text-decoration: underline; }
+
+    .shoe-name { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div class="header d-flex align-items-center justify-content-between">
+  <div class="brand">Brick<span>Finder</span> <span style="color:#8b8fa8;font-weight:400;font-size:.9rem">/ Arbitrage</span></div>
+  <div class="d-flex align-items-center gap-3">
+    <span class="last-updated" id="last-updated">–</span>
+    <span id="running-indicator" style="display:none"><span class="pulse"></span> <small class="text-success">Scraping…</small></span>
+    <button class="btn btn-sm me-1" id="btn-quick" onclick="triggerQuickScan()"
+      style="background:#1e3a2a;color:var(--accent);border:1px solid var(--accent-dim);border-radius:8px;padding:8px 16px;font-weight:600">
+      <i class="bi bi-lightning-fill"></i> Quick Scan (Tier 0)
+    </button>
+    <button class="btn btn-run" id="btn-run" onclick="triggerScrape()">
+      <i class="bi bi-play-fill"></i> Run Full Scrape
+    </button>
+  </div>
+</div>
+
+<div class="container-fluid p-3">
+
+  <!-- ── Stats row ── -->
+  <div class="row g-3 mb-3" id="stats-row">
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-label">Opportunities</div>
+        <div class="stat-value green" id="stat-opps">—</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-label">Avg ROI</div>
+        <div class="stat-value green" id="stat-avg-roi">—</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-label">Best ROI</div>
+        <div class="stat-value yellow" id="stat-best-roi">—</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-label">Active Suppliers</div>
+        <div class="stat-value" id="stat-suppliers">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Filters ── -->
+  <div class="filter-bar mb-3">
+    <div class="row g-2 align-items-end">
+      <div class="col-6 col-md-2">
+        <label>Min ROI %</label>
+        <input type="number" class="form-control form-control-sm" id="f-roi" value="5" min="0" step="1" />
+      </div>
+      <div class="col-6 col-md-2">
+        <label>Min 7-Day Sales</label>
+        <input type="number" class="form-control form-control-sm" id="f-sales" value="0" min="0" />
+      </div>
+      <div class="col-6 col-md-2">
+        <label>Platform</label>
+        <select class="form-select form-select-sm" id="f-platform">
+          <option value="">All</option>
+          <option value="stockx">StockX</option>
+          <option value="goat">GOAT</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label>Supplier</label>
+        <input type="text" class="form-control form-control-sm" id="f-supplier" placeholder="Any supplier…" />
+      </div>
+      <div class="col-6 col-md-2">
+        <label>SKU</label>
+        <input type="text" class="form-control form-control-sm" id="f-sku" placeholder="e.g. CW2288-111" />
+      </div>
+      <div class="col-6 col-md-2">
+        <button class="btn btn-sm w-100" style="background:#2a2d35;color:#e0e4f0" onclick="loadOpportunities()">
+          <i class="bi bi-funnel"></i> Apply
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Progress panel ── -->
+  <div id="progress-panel" class="mb-3"></div>
+
+  <!-- ── Main table ── -->
+  <div class="bg-dark rounded" style="border:1px solid #2a2d35;overflow:hidden">
+    <table id="opps-table" class="table table-dark table-hover mb-0 w-100">
+      <thead>
+        <tr>
+          <th>Shoe Name</th>
+          <th>SKU</th>
+          <th>Size</th>
+          <th>Supplier</th>
+          <th>Original $</th>
+          <th>Discounted $</th>
+          <th>Platform</th>
+          <th>Listing $</th>
+          <th>Payout $</th>
+          <th>ROI %</th>
+          <th>7D Sales</th>
+          <th>Links</th>
+        </tr>
+      </thead>
+      <tbody id="opps-body"></tbody>
+    </table>
+  </div>
+
+  <!-- ── Footer ── -->
+  <div class="text-center mt-3" style="color:#4a4e5e;font-size:.72rem">
+    Commission rate 12% · ROI = (Payout − Cost) / Cost × 100 · Min ROI threshold 5% · Auto-refresh every 5 min
+  </div>
+</div>
+
+<!-- ── Scripts ── -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.datatables.net/2.0.3/js/dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/2.0.3/js/dataTables.bootstrap5.min.js"></script>
+
+<script>
+// ── DataTable init ────────────────────────────────────────────────────────────
+let dt;
+$(document).ready(function () {
+  dt = $('#opps-table').DataTable({
+    paging: true,
+    pageLength: 50,
+    lengthMenu: [25, 50, 100, 250],
+    searching: true,
+    order: [[9, 'desc'], [10, 'desc']],   // ROI desc, then 7D sales desc
+    language: { emptyTable: 'No opportunities found — run a scrape to get started.' },
+    columnDefs: [
+      { orderable: false, targets: [11] },  // Links column not sortable
+      { type: 'num', targets: [4, 5, 7, 8, 9, 10] },
+    ]
+  });
+
+  loadStats();
+  loadOpportunities();
+
+  // Auto-refresh every 5 minutes
+  setInterval(() => { loadStats(); loadOpportunities(); }, 5 * 60 * 1000);
+  // Poll job status every 3 seconds
+  setInterval(pollJobStatus, 3000);
+});
+
+
+// ── Data loading ──────────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const r = await fetch('/api/opportunities/stats');
+    const d = await r.json();
+    document.getElementById('stat-opps').textContent     = d.total_opportunities ?? '0';
+    document.getElementById('stat-avg-roi').textContent  = d.avg_roi ? d.avg_roi.toFixed(1) + '%' : '—';
+    document.getElementById('stat-best-roi').textContent = d.best_roi ? d.best_roi.toFixed(1) + '%' : '—';
+    document.getElementById('stat-suppliers').textContent= d.total_active_suppliers ?? '—';
+
+    if (d.last_job?.finished_at) {
+      const t = new Date(d.last_job.finished_at);
+      document.getElementById('last-updated').textContent =
+        'Last updated ' + t.toLocaleTimeString();
+    }
+  } catch (e) { console.warn('Stats load failed', e); }
+}
+
+async function loadOpportunities() {
+  const params = new URLSearchParams({
+    min_roi:   document.getElementById('f-roi').value   || 20,
+    min_sales: document.getElementById('f-sales').value || 0,
+    platform:  document.getElementById('f-platform').value,
+    supplier:  document.getElementById('f-supplier').value,
+    sku:       document.getElementById('f-sku').value,
+    limit:     500,
+  });
+
+  try {
+    const r = await fetch('/api/opportunities/?' + params);
+    const rows = await r.json();
+    renderTable(rows);
+  } catch (e) {
+    console.warn('Opportunities load failed', e);
+  }
+}
+
+function renderTable(rows) {
+  dt.clear();
+  rows.forEach(o => {
+    const roiClass = o.roi >= 40 ? 'roi-high' : o.roi >= 25 ? 'roi-medium' : 'roi-low';
+    const platformBadge = o.listing_platform === 'stockx'
+      ? '<span class="badge badge-stockx">STOCKX</span>'
+      : '<span class="badge badge-goat">GOAT</span>';
+
+    const links = [
+      o.supplier_url ? `<a class="table-link" href="${o.supplier_url}" target="_blank"><i class="bi bi-bag"></i> Buy</a>` : '',
+      o.market_url   ? `<a class="table-link ms-2" href="${o.market_url}" target="_blank"><i class="bi bi-graph-up"></i> List</a>` : '',
+    ].filter(Boolean).join('');
+
+    dt.row.add([
+      `<div class="shoe-name" title="${esc(o.shoe_name)}">${esc(o.shoe_name)}</div>`,
+      `<code style="font-size:.78rem">${esc(o.sku)}</code>`,
+      o.size,
+      `<span title="${esc(o.supplier_name)}">${esc(o.supplier_name)}</span>`,
+      '$' + fmt(o.original_price),
+      `<span style="color:var(--accent)">$${fmt(o.discounted_price)}</span>` +
+        (o.discount_applied ? `<br><small style="color:#8b8fa8">${esc(o.discount_applied)}</small>` : ''),
+      platformBadge,
+      '$' + fmt(o.listing_price),
+      `<strong>$${fmt(o.payout_price)}</strong>`,
+      `<span class="${roiClass}">${o.roi.toFixed(1)}%</span>`,
+      o.sales_last_7_days,
+      links,
+    ]);
+  });
+  dt.draw();
+}
+
+
+// ── Scrape trigger ────────────────────────────────────────────────────────────
+async function _startScrapeEndpoint(endpoint, btn, readyLabel) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Starting…';
+
+  try {
+    const r = await fetch(endpoint, { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'already_running') {
+      showToast('A scrape is already running.', 'warning');
+    } else {
+      showProgressPanel();
+      streamProgress();
+    }
+  } catch (e) {
+    showToast('Failed to start scrape: ' + e, 'danger');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = readyLabel;
+}
+
+async function triggerScrape() {
+  await _startScrapeEndpoint(
+    '/api/jobs/scrape',
+    document.getElementById('btn-run'),
+    '<i class="bi bi-play-fill"></i> Run Full Scrape',
+  );
+}
+
+async function triggerQuickScan() {
+  await _startScrapeEndpoint(
+    '/api/jobs/scrape/quick',
+    document.getElementById('btn-quick'),
+    '<i class="bi bi-lightning-fill"></i> Quick Scan (Tier 0)',
+  );
+}
+
+function showProgressPanel() {
+  const panel = document.getElementById('progress-panel');
+  panel.style.display = 'block';
+  panel.innerHTML = '';
+}
+
+function streamProgress() {
+  const panel = document.getElementById('progress-panel');
+  const es = new EventSource('/api/jobs/progress');
+
+  es.onmessage = (e) => {
+    const line = document.createElement('div');
+    const txt = e.data;
+    if (txt.startsWith('  ✓')) line.className = 'line-ok';
+    else if (txt.includes('ERROR') || txt.includes('error')) line.className = 'line-err';
+    else line.className = 'line-info';
+    line.textContent = txt;
+    panel.appendChild(line);
+    panel.scrollTop = panel.scrollHeight;
+  };
+
+  es.addEventListener('done', () => {
+    es.close();
+    loadStats();
+    loadOpportunities();
+    document.getElementById('running-indicator').style.display = 'none';
+    showToast('Scrape complete!', 'success');
+  });
+
+  es.onerror = () => es.close();
+}
+
+async function pollJobStatus() {
+  try {
+    const r = await fetch('/api/jobs/status');
+    const d = await r.json();
+    document.getElementById('running-indicator').style.display = d.is_running ? 'flex' : 'none';
+    document.getElementById('btn-run').disabled   = d.is_running;
+    document.getElementById('btn-quick').disabled = d.is_running;
+  } catch (_) {}
+}
+
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function fmt(n)  { return parseFloat(n).toFixed(2); }
+function esc(s)  {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function showToast(msg, type='info') {
+  const t = document.createElement('div');
+  t.className = `alert alert-${type} position-fixed bottom-0 end-0 m-3`;
+  t.style.zIndex = 9999;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 4000);
+}
+</script>
+</body>
+</html>
