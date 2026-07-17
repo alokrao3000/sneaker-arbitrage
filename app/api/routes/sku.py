@@ -16,6 +16,8 @@ from playwright.sync_api import sync_playwright
 from app.config import settings
 from app.scrapers.browser import BrowserSession
 from app.scrapers.stockx_market import StockXBrowserClient
+from app.scrapers import stockx_api
+from app.scrapers.stockx_api import StockXAPIClient
 from app.scrapers.goat_market import GoatBrowserClient
 from app.scrapers.alias import AliasClient
 from app.services.pricing import classify_opportunity
@@ -41,17 +43,33 @@ def get_sku_live(
 
 
 def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
+    # StockX: official API when configured (fast, counts against the shared
+    # daily budget); stealth-browser fallback otherwise.
+    use_api = stockx_api.is_configured()
+    stockx_data = None
+    if use_api:
+        client = StockXAPIClient()
+        try:
+            stockx_data = client.get_market(sku, name=name).product
+        except Exception:
+            pass
+        finally:
+            client.close()
+
     # One shared Playwright driver — it only supports one instance per thread
     # at a time, so StockX and GOAT sessions must reuse it (see BrowserSession's
     # docstring in app/scrapers/browser.py).
     playwright = sync_playwright().start()
-    stockx_session = BrowserSession(
-        "stockx", headless=settings.browser_headless,
-        proxy_url=settings.stockx_proxy_url,
-        state_dir=settings.browser_state_dir,
-        nav_timeout_ms=settings.browser_nav_timeout_ms,
-        playwright=playwright,
-    )
+    stockx_session = None
+    if not use_api:
+        stockx_session = BrowserSession(
+            "stockx", headless=settings.browser_headless,
+            proxy_url=settings.stockx_proxy_url,
+            state_dir=settings.browser_state_dir,
+            nav_timeout_ms=settings.browser_nav_timeout_ms,
+            playwright=playwright,
+        )
+        stockx_session.start()
     goat_session = BrowserSession(
         "goat", headless=settings.browser_headless,
         proxy_url=settings.goat_proxy_url,
@@ -60,16 +78,15 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
         use_stealth=False,  # stealth patches crash GOAT's own bot-detection JS
         playwright=playwright,
     )
-    stockx_session.start()
     goat_session.start()
 
     try:
-        stockx_data = None
         goat_data = None
-        try:
-            stockx_data = StockXBrowserClient(stockx_session).get_product(sku, name=name)
-        except Exception:
-            pass
+        if stockx_session is not None:
+            try:
+                stockx_data = StockXBrowserClient(stockx_session).get_product(sku, name=name)
+            except Exception:
+                pass
         try:
             goat_data = GoatBrowserClient(goat_session).get_product(sku, name=name)
         except Exception:
@@ -135,18 +152,22 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
                 result = classify_opportunity(
                     original_price=cost, discount_percent=0.0,
                     listing_price=entry["lowest_ask"],
+                    platform=entry["platform"],
+                    resale_price_type="lowest_ask",
                     sales_last_7_days=sales_last_7_days,
                 )
             sizes_out.append({
                 **entry,
                 "sales_last_7_days": sales_last_7_days,
                 "payout_after_fees": round(result.payout, 2) if result else None,
+                "margin": round(result.margin, 2) if result else None,
                 "roi": round(result.roi, 2) if result else None,
                 "is_opportunity": result.is_opportunity if result else None,
             })
 
         return {"sku": sku, "name": product_name, "sizes": sizes_out}
     finally:
-        stockx_session.close()
+        if stockx_session is not None:
+            stockx_session.close()
         goat_session.close()
         playwright.stop()

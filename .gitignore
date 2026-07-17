@@ -1,0 +1,10 @@
+# Secrets — .env holds DB password + API keys; never commit it
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Runtime state
+data/browser_state/

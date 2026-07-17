@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -6,12 +8,20 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from app.database import init_db, SessionLocal
+from app.database import init_db, close_orphaned_jobs, SessionLocal
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.services.supplier_loader import load_suppliers
 from app.api.routes.opportunities import router as opp_router
 from app.api.routes.jobs import router as jobs_router
 from app.api.routes.sku import router as sku_router
+
+# uvicorn's --reload supervisor sets WindowsSelectorEventLoopPolicy in the
+# reloaded worker process on Windows, which can't create subprocesses —
+# breaking Playwright (used by the StockX/GOAT browser scrapers), which
+# launches its browser driver as a subprocess. Force Proactor explicitly so
+# --reload and plain `uvicorn` behave the same way.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +37,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 async def lifespan(app: FastAPI):
     # ── Startup ──
     logger.info("Initialising database …")
-    init_db()
+    init_db()   # raises on schema drift — nothing else may run against a stale schema
+    close_orphaned_jobs()   # jobs stuck 'running' from a killed process → terminal error
 
     # Seed suppliers on first run (or refresh from CSV)
     db = SessionLocal()

@@ -1,81 +1,81 @@
-name,url,category,platform_type,discount_notes,discount_percent,active
-Footlocker,https://www.footlocker.com,footsite,footlocker,"20% & 25% Off with member codes",20,true
-Champs Sports,https://www.champssports.com,footsite,footlocker,"20% & 25% Off with member codes",20,true
-Eastbay,https://www.eastbay.com,footsite,footlocker,"20% & 25% Off with member codes",20,true
-Hibbett,https://www.hibbett.com,footsite,custom,"15% & 25% Off",15,true
-WSS,https://www.wsssports.com,footsite,custom,"10% Off (EMAIL)",10,true
-DTLR,https://www.dtlr.com,footsite,custom,"10% Off",10,true
-Jimmy Jazz,https://www.jimmyjazz.com,footsite,custom,"$5 Off / Free Shipping $100+",0,true
-Snipes,https://www.snipesusa.com,footsite,custom,"Free Shipping $125+",0,true
-Shoe Palace,https://www.shoepalace.com,footsite,custom,"",0,true
-Renarts,https://www.renarts.com,footsite,shopify,"Order Form pricing",0,true
-SNS,https://www.sneakersnstuff.com,tier0_qs,custom,"SNEAKERS code 10% Off / $10 Shipping",10,true
-Bodega,https://bdgastore.com,tier0_qs,shopify,"10% off",10,true
-Slam Jam,https://slamjam.com,tier0_qs,custom,"Free Shipping $270+",0,true
-Sneaker BAAS,https://www.sneakerbaas.com,tier0_qs,shopify,"10% off",10,true
-CNCPTS,https://cncpts.com,tier0_qs,shopify,"$250 free shipping",0,true
-Corporate Got Em,https://www.corporategotem.com,tier0_qs,shopify,"10% off Email",10,true
-Lapstone & Hammer,https://lapstoneandhammer.com,tier0_qs,shopify,"10% Signup",10,true
-Nohble,https://nohble.com,tier0_qs,shopify,"Free Shipping $200+",0,true
-Oneness,https://www.onenessboutique.com,tier0_qs,shopify,"Free shipping over $200",0,true
-Packer,https://packershoes.com,tier0_qs,shopify,"",0,true
-Premier,https://thepremierstore.com,tier0_qs,shopify,"15% OFF Email Sign Up / Free Shipping Over $50",15,true
-Sneaker Politics,https://sneakerpolitics.com,tier0_qs,shopify,"Sign Up For 15% Off!",15,true
-Notre,https://notre-shop.com,tier0_qs,shopify,"",0,true
-Suede Store,https://suede-store.com,tier0_qs,shopify,"10% signup discount",10,true
-UNKWN,https://www.unknwn.com,tier0_qs,shopify,"",0,true
-Afew Store,https://en.afew-store.com,tier0_qs,shopify,"",0,true
-Tactics,https://www.tactics.com,tier0_qs,shopify,"Free Shipping Over $60 / 10% off signup",10,true
-West NYC,https://www.westnyc.com,tier0_qs,shopify,"",0,true
-Xhibition,https://www.xhibition.co,tier0_qs,shopify,"15% Sign Up",15,true
-Solestopp,https://www.solestopp.com,tier0_qs,shopify,"10% off your first order",10,true
-Alumni NY,https://www.alumniofny.com,tier0_qs,shopify,"",0,true
-Feature,https://feature.com,tier0_qs,shopify,"Free Shipping over $250 / 10% off Email sign-up",10,true
-Sole Classics,https://soleclassics.com,tier0_qs,shopify,"Free shipping over $150+",0,true
-Saint Alfred,https://www.saintalfred.com,tier0_qs,shopify,"Free shipping over $200",0,true
-Extra Butter,https://extrabutterny.com,tier0_qs,shopify,"",0,true
-Kith,https://kith.com,tier0_qs,shopify,"",0,true
-Above The Clouds,https://www.abovethecloudsstore.com,shopify_main,shopify,"",0,true
-Addict Miami,https://www.addictmiami.com,shopify_main,shopify,"",0,true
-Alife New York,https://alifenewyork.com,shopify_main,shopify,"",0,true
-Among Few,https://www.amongstfew.com,shopify_main,shopify,"",0,true
-Anti Social Social Club,https://shop.antisocialsocialclub.com,shopify_main,shopify,"",0,true
-APB Store,https://www.apbstore.com,shopify_main,shopify,"",0,true
-BBC Ice Cream,https://www.bbcicecream.com,shopify_main,shopify,"",0,true
-BLKMKT,https://www.blkmkt.us,shopify_main,shopify,"",0,true
-Blends,https://www.blendsus.com,shopify_main,shopify,"",0,true
-Bows and Arrows,https://www.bowsandarrowsberkeley.com,shopify_main,shopify,"",0,true
-Capsule Toronto,https://www.capsuletoronto.com,shopify_canada,shopify,"",0,true
-Commonwealth,https://commonwealth-ftgg.com,shopify_main,shopify,"",0,true
-Courtside Sneakers,https://www.courtsidesneakers.com,shopify_main,shopify,"",0,true
-Deadstock,https://www.deadstock.ca,shopify_canada,shopify,"",0,true
-Decade Store,https://www.decadestore.co.uk,shopify_europe,shopify,"",0,true
-Device One,https://deviceone.gr,shopify_europe,shopify,"",0,true
-Enter Nostalgia,https://enternostalgia.com,shopify_main,shopify,"",0,true
-Fear of God,https://fearofgod.com,shopify_main,shopify,"",0,true
-Fice Gallery,https://www.ficegallery.com,shopify_main,shopify,"",0,true
-Focus Pocus,https://focuspocus.co.uk,shopify_europe,shopify,"",0,true
-Hanon Shop,https://www.hanon-shop.com,shopify_europe,shopify,"",0,true
-High and Lows,https://www.highsandlows.net.au,shopify_main,shopify,"",0,true
-Juice Store,https://juicestore.com,shopify_main,shopify,"",0,true
-Likelihood,https://likelihood.us,shopify_main,shopify,"",0,true
-Myfavoritethings,https://myfavoritethings.fi,shopify_europe,shopify,"",0,true
-NRML,https://nrml.ca,shopify_canada,shopify,"",0,true
-Noir Fonce,https://www.noirfonce.eu,shopify_europe,shopify,"",0,true
-OAK,https://offthehook.ca,shopify_canada,shopify,"",0,true
-Oqium,https://oqium.com,shopify_europe,shopify,"",0,true
-Patta,https://www.patta.nl,shopify_europe,shopify,"",0,true
-Renarts,https://renarts.com,shopify_main,shopify,"Free Shipping Over $60",0,false
-RSVP Gallery,https://rsvpgallery.com,shopify_main,shopify,"",0,true
-Slam City Skates,https://www.slamcity.com,shopify_europe,shopify,"",0,true
-Sneaker Baas,https://www.sneakerbaas.com,shopify_europe,shopify,"",0,false
-Sneaker Junkies,https://sneakerjunkiesusa.com,shopify_main,shopify,"Sign Up For 15% Off!",15,true
-Space 23,https://www.space23.it,shopify_europe,shopify,"",0,true
-Staple Pigeon,https://www.staplepigeon.com,shopify_main,shopify,"",0,true
-Stone Island,https://www.stoneisland.co.uk,shopify_europe,shopify,"",0,true
-Stussy,https://www.stussy.com,shopify_main,shopify,"",0,true
-The Closet Inc,https://www.theclosetinc.com,shopify_main,shopify,"",0,true
-Trophy Room,https://www.trophyroomstore.com,shopify_main,shopify,"",0,true
-Undefeated,https://undefeated.com,shopify_main,shopify,"",0,true
-Union LA,https://store.unionlosangeles.com,shopify_main,shopify,"",0,true
-Welcome Leeds,https://welcomeleeds.com,shopify_europe,shopify,"",0,true
+name,url,category,platform_type,discount_notes,discount_amount,discount_percent,active
+Footlocker,https://www.footlocker.com,footsite,footlocker,20% & 25% Off with member codes,0,20,true
+Champs Sports,https://www.champssports.com,footsite,footlocker,20% & 25% Off with member codes,0,20,true
+Eastbay,https://www.eastbay.com,footsite,footlocker,20% & 25% Off with member codes,0,20,true
+Hibbett,https://www.hibbett.com,footsite,custom,15% & 25% Off,0,15,true
+WSS,https://www.wsssports.com,footsite,custom,10% Off (EMAIL),0,10,true
+DTLR,https://www.dtlr.com,footsite,custom,10% Off,0,10,true
+Jimmy Jazz,https://www.jimmyjazz.com,footsite,custom,$5 Off / Free Shipping $100+,5,0,true
+Snipes,https://www.snipesusa.com,footsite,custom,Free Shipping $125+,0,0,true
+Shoe Palace,https://www.shoepalace.com,footsite,custom,,0,0,true
+Renarts,https://www.renarts.com,footsite,shopify,Order Form pricing,0,0,true
+SNS,https://www.sneakersnstuff.com,tier0_qs,custom,SNEAKERS code 10% Off / $10 Shipping,0,10,true
+Bodega,https://bdgastore.com,tier0_qs,shopify,10% off,0,10,true
+Slam Jam,https://slamjam.com,tier0_qs,custom,Free Shipping $270+,0,0,true
+Sneaker BAAS,https://www.sneakerbaas.com,tier0_qs,shopify,10% off,0,10,true
+CNCPTS,https://cncpts.com,tier0_qs,shopify,$250 free shipping,0,0,true
+Corporate Got Em,https://www.corporategotem.com,tier0_qs,shopify,10% off Email,0,10,true
+Lapstone & Hammer,https://lapstoneandhammer.com,tier0_qs,shopify,10% Signup,0,10,true
+Nohble,https://nohble.com,tier0_qs,shopify,Free Shipping $200+,0,0,true
+Oneness,https://www.onenessboutique.com,tier0_qs,shopify,Free shipping over $200,0,0,true
+Packer,https://packershoes.com,tier0_qs,shopify,,0,0,true
+Premier,https://thepremierstore.com,tier0_qs,shopify,15% OFF Email Sign Up / Free Shipping Over $50,0,15,true
+Sneaker Politics,https://sneakerpolitics.com,tier0_qs,shopify,Sign Up For 15% Off!,0,15,true
+Notre,https://notre-shop.com,tier0_qs,shopify,,0,0,true
+Suede Store,https://suede-store.com,tier0_qs,shopify,10% signup discount,0,10,true
+UNKWN,https://www.unknwn.com,tier0_qs,shopify,,0,0,true
+Afew Store,https://en.afew-store.com,tier0_qs,shopify,,0,0,true
+Tactics,https://www.tactics.com,tier0_qs,shopify,Free Shipping Over $60 / 10% off signup,0,10,true
+West NYC,https://www.westnyc.com,tier0_qs,shopify,,0,0,true
+Xhibition,https://www.xhibition.co,tier0_qs,shopify,15% Sign Up,0,15,true
+Solestopp,https://www.solestopp.com,tier0_qs,shopify,10% off your first order,0,10,true
+Alumni NY,https://www.alumniofny.com,tier0_qs,shopify,,0,0,true
+Feature,https://feature.com,tier0_qs,shopify,Free Shipping over $250 / 10% off Email sign-up,0,10,true
+Sole Classics,https://soleclassics.com,tier0_qs,shopify,Free shipping over $150+,0,0,true
+Saint Alfred,https://www.saintalfred.com,tier0_qs,shopify,Free shipping over $200,0,0,true
+Extra Butter,https://extrabutterny.com,tier0_qs,shopify,,0,0,true
+Kith,https://kith.com,tier0_qs,shopify,,0,0,true
+Above The Clouds,https://www.abovethecloudsstore.com,shopify_main,shopify,,0,0,true
+Addict Miami,https://www.addictmiami.com,shopify_main,shopify,,0,0,true
+Alife New York,https://alifenewyork.com,shopify_main,shopify,,0,0,true
+Among Few,https://www.amongstfew.com,shopify_main,shopify,,0,0,true
+Anti Social Social Club,https://shop.antisocialsocialclub.com,shopify_main,shopify,,0,0,true
+APB Store,https://www.apbstore.com,shopify_main,shopify,,0,0,true
+BBC Ice Cream,https://www.bbcicecream.com,shopify_main,shopify,,0,0,true
+BLKMKT,https://www.blkmkt.us,shopify_main,shopify,,0,0,true
+Blends,https://www.blendsus.com,shopify_main,shopify,,0,0,true
+Bows and Arrows,https://www.bowsandarrowsberkeley.com,shopify_main,shopify,,0,0,true
+Capsule Toronto,https://www.capsuletoronto.com,shopify_canada,shopify,,0,0,true
+Commonwealth,https://commonwealth-ftgg.com,shopify_main,shopify,,0,0,true
+Courtside Sneakers,https://www.courtsidesneakers.com,shopify_main,shopify,,0,0,true
+Deadstock,https://www.deadstock.ca,shopify_canada,shopify,,0,0,true
+Decade Store,https://www.decadestore.co.uk,shopify_europe,shopify,,0,0,true
+Device One,https://deviceone.gr,shopify_europe,shopify,,0,0,true
+Enter Nostalgia,https://enternostalgia.com,shopify_main,shopify,,0,0,true
+Fear of God,https://fearofgod.com,shopify_main,shopify,,0,0,true
+Fice Gallery,https://www.ficegallery.com,shopify_main,shopify,,0,0,true
+Focus Pocus,https://focuspocus.co.uk,shopify_europe,shopify,,0,0,true
+Hanon Shop,https://www.hanon-shop.com,shopify_europe,shopify,,0,0,true
+High and Lows,https://www.highsandlows.net.au,shopify_main,shopify,,0,0,true
+Juice Store,https://juicestore.com,shopify_main,shopify,,0,0,true
+Likelihood,https://likelihood.us,shopify_main,shopify,,0,0,true
+Myfavoritethings,https://myfavoritethings.fi,shopify_europe,shopify,,0,0,true
+NRML,https://nrml.ca,shopify_canada,shopify,,0,0,true
+Noir Fonce,https://www.noirfonce.eu,shopify_europe,shopify,,0,0,true
+OAK,https://offthehook.ca,shopify_canada,shopify,,0,0,true
+Oqium,https://oqium.com,shopify_europe,shopify,,0,0,true
+Patta,https://www.patta.nl,shopify_europe,shopify,,0,0,true
+Renarts,https://renarts.com,shopify_main,shopify,Free Shipping Over $60,0,0,false
+RSVP Gallery,https://rsvpgallery.com,shopify_main,shopify,,0,0,true
+Slam City Skates,https://www.slamcity.com,shopify_europe,shopify,,0,0,true
+Sneaker Baas,https://www.sneakerbaas.com,shopify_europe,shopify,,0,0,false
+Sneaker Junkies,https://sneakerjunkiesusa.com,shopify_main,shopify,Sign Up For 15% Off!,0,15,true
+Space 23,https://www.space23.it,shopify_europe,shopify,,0,0,true
+Staple Pigeon,https://www.staplepigeon.com,shopify_main,shopify,,0,0,true
+Stone Island,https://www.stoneisland.co.uk,shopify_europe,shopify,,0,0,true
+Stussy,https://www.stussy.com,shopify_main,shopify,,0,0,true
+The Closet Inc,https://www.theclosetinc.com,shopify_main,shopify,,0,0,true
+Trophy Room,https://www.trophyroomstore.com,shopify_main,shopify,,0,0,true
+Undefeated,https://undefeated.com,shopify_main,shopify,,0,0,true
+Union LA,https://store.unionlosangeles.com,shopify_main,shopify,,0,0,true
+Welcome Leeds,https://welcomeleeds.com,shopify_europe,shopify,,0,0,true

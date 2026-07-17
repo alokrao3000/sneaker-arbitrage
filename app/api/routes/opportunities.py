@@ -1,14 +1,20 @@
+from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
 
+from app.config import settings
 from app.database import get_db, Opportunity, Supplier
 
 router = APIRouter()
 
 
 def _opp_to_dict(o: Opportunity) -> dict:
+    # "fresh" = the market data behind this row is younger than the StockX
+    # market TTL; anything older is a cached evaluation.
+    ttl = timedelta(hours=settings.stockx_market_ttl_hours)
+    market_is_fresh = bool(o.market_fetched_at and datetime.utcnow() - o.market_fetched_at < ttl)
     return {
         "id":               o.id,
         "shoe_name":        o.shoe_name,
@@ -18,9 +24,17 @@ def _opp_to_dict(o: Opportunity) -> dict:
         "original_price":   float(o.original_price or 0),
         "discounted_price": float(o.discounted_price or 0),
         "discount_applied": o.discount_applied,
+        "cashback_rate":    float(o.cashback_rate or 0),
+        "cashback_portal":  o.cashback_portal,
+        "cashback_amount":  float(o.cashback_amount or 0),
+        "effective_price":  float(o.effective_price if o.effective_price is not None else o.discounted_price or 0),
         "listing_platform": o.listing_platform,
         "listing_price":    float(o.listing_price or 0),
+        "resale_price_type": o.resale_price_type or "lowest_ask",
         "payout_price":     float(o.payout_price or 0),
+        "margin":           round(float(o.margin), 2) if o.margin is not None else None,
+        "market_fetched_at": o.market_fetched_at.isoformat() if o.market_fetched_at else None,
+        "market_is_fresh":  market_is_fresh,
         "roi":              round(float(o.roi or 0), 2),
         "sales_last_7_days":o.sales_last_7_days,  # null = unknown, not confirmed zero
         "supplier_url":     o.supplier_url,
@@ -91,17 +105,32 @@ def get_stats(db: Session = Depends(get_db)):
         .first()
     )
 
+    # StockX daily budget — the app's real constraint once the official API
+    # is in use. calls_today counts HTTP requests (a SKU lookup = 2–3).
+    from app.scrapers import stockx_api as sx
+    stockx_budget = None
+    if sx.is_configured():
+        from app.database import StockXApiUsage
+        row = db.get(StockXApiUsage, datetime.utcnow().strftime("%Y-%m-%d"))
+        stockx_budget = {
+            "calls_today": row.calls if row else 0,
+            "daily_limit": sx.DAILY_REQUEST_LIMIT,
+        }
+
     return {
         "total_opportunities": total,
         "avg_roi": round(float(avg_roi or 0), 2),
         "best_roi": round(float(best_roi or 0), 2),
         "total_active_suppliers": total_suppliers,
+        "stockx_budget": stockx_budget,
         "last_job": {
             "id": last_job.id if last_job else None,
             "status": last_job.status if last_job else None,
             "started_at": last_job.started_at.isoformat() if last_job else None,
             "finished_at": last_job.finished_at.isoformat() if last_job and last_job.finished_at else None,
             "opportunities_found": last_job.opportunities_found if last_job else 0,
+            "stockx_calls_made": last_job.stockx_calls_made or 0,
+            "stockx_calls_skipped": last_job.stockx_calls_skipped or 0,
         } if last_job else None,
     }
 

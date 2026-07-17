@@ -143,28 +143,35 @@
 
   <!-- ── Stats row ── -->
   <div class="row g-3 mb-3" id="stats-row">
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="stat-label">Opportunities</div>
         <div class="stat-value green" id="stat-opps">—</div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="stat-label">Avg ROI</div>
         <div class="stat-value green" id="stat-avg-roi">—</div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="stat-label">Best ROI</div>
         <div class="stat-value yellow" id="stat-best-roi">—</div>
       </div>
     </div>
-    <div class="col-6 col-md-3">
+    <div class="col-6 col-md">
       <div class="stat-card">
         <div class="stat-label">Active Suppliers</div>
         <div class="stat-value" id="stat-suppliers">—</div>
+      </div>
+    </div>
+    <div class="col-6 col-md">
+      <div class="stat-card">
+        <div class="stat-label">StockX Budget (Today)</div>
+        <div class="stat-value" id="stat-stockx-budget">—</div>
+        <div style="font-size:.7rem;color:#8b8fa8" id="stat-stockx-run">last run: —</div>
       </div>
     </div>
   </div>
@@ -207,6 +214,27 @@
   <!-- ── Progress panel ── -->
   <div id="progress-panel" class="mb-3"></div>
 
+  <!-- ── Per-retailer scrape status (last job) ── -->
+  <div class="bg-dark rounded mb-3" id="supplier-status-panel" style="border:1px solid #2a2d35;overflow:hidden;display:none">
+    <div class="px-3 py-2" style="border-bottom:1px solid #2a2d35;color:#8b8fa8;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em">
+      Per-Retailer Status — Last Scrape
+    </div>
+    <div style="max-height:260px;overflow-y:auto">
+      <table class="table table-dark table-sm mb-0" style="font-size:.8rem">
+        <thead>
+          <tr>
+            <th>Retailer</th>
+            <th>Status</th>
+            <th>Items Found</th>
+            <th>Time</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody id="supplier-status-body"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- ── Main table ── -->
   <div class="bg-dark rounded" style="border:1px solid #2a2d35;overflow:hidden">
     <table id="opps-table" class="table table-dark table-hover mb-0 w-100">
@@ -218,9 +246,12 @@
           <th>Supplier</th>
           <th>Original $</th>
           <th>Discounted $</th>
+          <th>Cashback</th>
+          <th>Effective $</th>
           <th>Platform</th>
-          <th>Listing $</th>
+          <th>Resale $</th>
           <th>Payout $</th>
+          <th>Margin $</th>
           <th>ROI %</th>
           <th>7D Sales</th>
           <th>Links</th>
@@ -232,7 +263,7 @@
 
   <!-- ── Footer ── -->
   <div class="text-center mt-3" style="color:#4a4e5e;font-size:.72rem">
-    Commission rate 12% · ROI = (Payout − Cost) / Cost × 100 · Min ROI threshold 5% · Auto-refresh every 5 min
+    StockX fees: level-based transaction fee + 3% processing + shipping (app/stockx_fees.py) · Effective $ = (List × (1 − discount)) × (1 − cashback) · Margin $ = Resale − fees − Effective $ · Opportunity when Margin &gt; min threshold · ● fresh / ● cached StockX data · Auto-refresh every 5 min
   </div>
 </div>
 
@@ -251,16 +282,17 @@ $(document).ready(function () {
     pageLength: 50,
     lengthMenu: [25, 50, 100, 250],
     searching: true,
-    order: [[9, 'desc'], [10, 'desc']],   // ROI desc, then 7D sales desc
+    order: [[11, 'desc'], [12, 'desc']],   // Margin $ desc, then ROI desc — best flips on top
     language: { emptyTable: 'No opportunities found — run a scrape to get started.' },
     columnDefs: [
-      { orderable: false, targets: [11] },  // Links column not sortable
-      { type: 'num', targets: [4, 5, 7, 8, 9, 10] },
+      { orderable: false, targets: [14] },  // Links column not sortable
+      { type: 'num', targets: [4, 5, 7, 9, 10, 11, 12, 13] },
     ]
   });
 
   loadStats();
   loadOpportunities();
+  loadSupplierStatus();
 
   // Auto-refresh every 5 minutes
   setInterval(() => { loadStats(); loadOpportunities(); }, 5 * 60 * 1000);
@@ -283,6 +315,24 @@ async function loadStats() {
       const t = new Date(d.last_job.finished_at);
       document.getElementById('last-updated').textContent =
         'Last updated ' + t.toLocaleTimeString();
+    }
+
+    // StockX budget — API requests used today vs the daily limit, plus the
+    // last run's lookup accounting (made vs skipped by the SKU cache).
+    const budgetEl = document.getElementById('stat-stockx-budget');
+    if (d.stockx_budget) {
+      budgetEl.textContent =
+        d.stockx_budget.calls_today.toLocaleString() + ' / ' + d.stockx_budget.daily_limit.toLocaleString();
+      budgetEl.className = 'stat-value ' +
+        (d.stockx_budget.calls_today / d.stockx_budget.daily_limit > 0.8 ? 'yellow' : 'green');
+    } else {
+      budgetEl.textContent = 'API off';
+      budgetEl.className = 'stat-value';
+      budgetEl.title = 'StockX official API not configured — using browser scraper';
+    }
+    if (d.last_job) {
+      document.getElementById('stat-stockx-run').textContent =
+        `last run: ${d.last_job.stockx_calls_made ?? 0} lookups, ${d.last_job.stockx_calls_skipped ?? 0} skipped (cache)`;
     }
   } catch (e) { console.warn('Stats load failed', e); }
 }
@@ -310,14 +360,27 @@ function renderTable(rows) {
   dt.clear();
   rows.forEach(o => {
     const roiClass = o.roi >= 40 ? 'roi-high' : o.roi >= 25 ? 'roi-medium' : 'roi-low';
+    const marginClass = o.margin >= 30 ? 'roi-high' : o.margin >= 15 ? 'roi-medium' : 'roi-low';
     const platformBadge = o.listing_platform === 'stockx'
       ? '<span class="badge badge-stockx">STOCKX</span>'
       : '<span class="badge badge-goat">GOAT</span>';
+
+    // ask = live listing price; sale = last cleared transaction
+    const typeBadge = o.resale_price_type === 'last_sale'
+      ? '<span class="badge" style="background:#6b4bd6;font-size:.62rem" title="Last cleared sale — real transaction, possibly stale">SALE</span>'
+      : '<span class="badge" style="background:#2a2d35;color:#9fb5ff;font-size:.62rem" title="Lowest ask — a live listing, not a cleared sale">ASK</span>';
+    const freshDot = o.market_is_fresh
+      ? '<span title="StockX data fetched within the market TTL" style="color:var(--accent)">●</span>'
+      : `<span title="Cached StockX data${o.market_fetched_at ? ' — fetched ' + new Date(o.market_fetched_at).toLocaleString() : ''}" style="color:#4a4e5e">●</span>`;
 
     const links = [
       o.supplier_url ? `<a class="table-link" href="${o.supplier_url}" target="_blank"><i class="bi bi-bag"></i> Buy</a>` : '',
       o.market_url   ? `<a class="table-link ms-2" href="${o.market_url}" target="_blank"><i class="bi bi-graph-up"></i> List</a>` : '',
     ].filter(Boolean).join('');
+
+    const cashbackCell = o.cashback_rate > 0
+      ? `$${fmt(o.cashback_amount)}<br><small style="color:#8b8fa8">${(o.cashback_rate * 100).toFixed(1)}% via ${esc(o.cashback_portal)}</small>`
+      : '<span style="color:#4a4e5e">—</span>';
 
     dt.row.add([
       `<div class="shoe-name" title="${esc(o.shoe_name)}">${esc(o.shoe_name)}</div>`,
@@ -327,9 +390,12 @@ function renderTable(rows) {
       '$' + fmt(o.original_price),
       `<span style="color:var(--accent)">$${fmt(o.discounted_price)}</span>` +
         (o.discount_applied ? `<br><small style="color:#8b8fa8">${esc(o.discount_applied)}</small>` : ''),
+      cashbackCell,
+      `<strong>$${fmt(o.effective_price)}</strong>`,
       platformBadge,
-      '$' + fmt(o.listing_price),
+      `$${fmt(o.listing_price)} ${typeBadge} ${freshDot}`,
       `<strong>$${fmt(o.payout_price)}</strong>`,
+      `<span class="${marginClass}">$${fmt(o.margin ?? 0)}</span>`,
       `<span class="${roiClass}">${o.roi.toFixed(1)}%</span>`,
       o.sales_last_7_days,
       links,
@@ -402,11 +468,42 @@ function streamProgress() {
     es.close();
     loadStats();
     loadOpportunities();
+    loadSupplierStatus();
     document.getElementById('running-indicator').style.display = 'none';
     showToast('Scrape complete!', 'success');
   });
 
   es.onerror = () => es.close();
+}
+
+async function loadSupplierStatus() {
+  try {
+    const statusR = await fetch('/api/jobs/status');
+    const status = await statusR.json();
+    if (!status.current_job_id) return;
+
+    const r = await fetch(`/api/jobs/${status.current_job_id}/suppliers`);
+    const rows = await r.json();
+    if (!rows.length) return;
+
+    const statusBadge = {
+      succeeded: '<span class="text-success">✓ succeeded</span>',
+      failed: '<span style="color:var(--danger)">✗ failed</span>',
+      skipped: '<span style="color:#8b8fa8">– skipped</span>',
+    };
+
+    const body = document.getElementById('supplier-status-body');
+    body.innerHTML = rows.map(s => `
+      <tr>
+        <td>${esc(s.supplier_name)}</td>
+        <td>${statusBadge[s.status] || esc(s.status)}</td>
+        <td>${s.items_found ?? '—'}</td>
+        <td>${s.elapsed_seconds != null ? s.elapsed_seconds.toFixed(1) + 's' : '—'}</td>
+        <td><small style="color:#8b8fa8">${esc(s.error_message || '')}</small></td>
+      </tr>
+    `).join('');
+    document.getElementById('supplier-status-panel').style.display = 'block';
+  } catch (e) { console.warn('Supplier status load failed', e); }
 }
 
 async function pollJobStatus() {

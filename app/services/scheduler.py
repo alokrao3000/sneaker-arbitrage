@@ -48,6 +48,25 @@ def _push_progress(msg: str):
 
 # ── Job runner ────────────────────────────────────────────────────────────────
 
+def _finalize_job(job_id: int, error: Optional[str]):
+    """Guarantee the job reaches a terminal status. Uses a FRESH session —
+    the run's own session may be in a failed-transaction state, and a close
+    attempt through it would itself raise, leaving the job stuck 'running'."""
+    session = SessionLocal()
+    try:
+        j = session.get(ScrapeJob, job_id)
+        if j is not None and j.status == "running":
+            j.status = "error"
+            j.error_message = error or "job exited without reaching a terminal status"
+            j.finished_at = datetime.utcnow()
+            session.commit()
+            logger.warning(f"Job #{job_id} force-closed as error: {j.error_message}")
+    except Exception:
+        logger.exception(f"Failed to finalize job #{job_id}")
+    finally:
+        session.close()
+
+
 def _run_scrape_job(categories=None, min_discount=0):
     global _is_running, _current_job_id
 
@@ -63,30 +82,38 @@ def _run_scrape_job(categories=None, min_discount=0):
     db.add(job)
     db.commit()
     db.refresh(job)
+    job_id = job.id
 
     with _lock:
-        _current_job_id = job.id
+        _current_job_id = job_id
 
-    _push_progress(f"Job #{job.id} started")
+    _push_progress(f"Job #{job_id} started")
 
+    error: Optional[str] = None
     try:
         from app.services.arbitrage import run_full_scrape
         run_full_scrape(
-            db, job.id,
+            db, job_id,
             progress=_push_progress,
             categories=categories,
             min_discount=min_discount,
         )
-    except Exception as exc:
+    except BaseException as exc:   # noqa: BLE001 — even SystemExit must close the job
         logger.exception("Scrape job failed")
-        db.rollback()
-        job.status = "error"
-        job.error_message = str(exc)
-        job.finished_at = datetime.utcnow()
-        db.commit()
-        _push_progress(f"ERROR: {exc}")
+        # str(exc) can be empty (seen in job history as blank error rows) —
+        # fall back to repr so the failure is always identifiable.
+        error = str(exc) or repr(exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _push_progress(f"ERROR: {error}")
     finally:
         db.close()
+        # Terminal-status guarantee: whatever path got us here (success close
+        # inside run_full_scrape, the except above, or an exception thrown by
+        # the except block itself), the job must not stay 'running'.
+        _finalize_job(job_id, error)
         with _lock:
             _is_running = False
 

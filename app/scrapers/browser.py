@@ -30,13 +30,31 @@ Playwright-based scraping must never share a thread with it. Use
 `ThreadBoundProxy` (below) to confine all Playwright activity to one
 dedicated worker thread for the life of a scrape run.
 """
+import asyncio
 import concurrent.futures
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
 from playwright.sync_api import sync_playwright, Page, BrowserContext, Response
+
+
+def _init_worker_event_loop() -> None:
+    """ThreadPoolExecutor initializer for the browser-worker thread.
+
+    uvicorn forces `WindowsSelectorEventLoopPolicy` process-wide on Windows
+    (see uvicorn/loops/asyncio.py). SelectorEventLoop can't spawn subprocesses
+    on Windows, so when Playwright's sync API creates a fresh event loop on
+    this thread to launch the browser, it fails with
+    `NotImplementedError` from `asyncio.base_events._make_subprocess_transport`.
+    Give this thread its own ProactorEventLoop up front so Playwright picks
+    it up instead — this is scoped to the worker thread only and doesn't
+    affect uvicorn's main-thread loop.
+    """
+    if sys.platform == "win32":
+        asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
 try:
     from playwright_stealth import stealth_sync
@@ -209,7 +227,9 @@ class ThreadBoundProxy:
 
     def __init__(self):
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="browser-worker"
+            max_workers=1,
+            thread_name_prefix="browser-worker",
+            initializer=_init_worker_event_loop,
         )
         self._obj = None
 

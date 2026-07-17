@@ -38,6 +38,14 @@ def load_suppliers(db: Session) -> int:
             except ValueError:
                 discount_pct = 0.0
 
+            # Flat dollar discount — only meaningful when discount_percent is 0
+            # (e.g. Jimmy Jazz's "$5 Off" instead of a percent-based code).
+            amount_raw = (row.get("discount_amount") or "0").strip()
+            try:
+                discount_amt = float(amount_raw) if amount_raw else 0.0
+            except ValueError:
+                discount_amt = 0.0
+
             # Upsert: find by name + URL, then update or create
             existing: Optional[Supplier] = (
                 db.query(Supplier).filter_by(name=name, url=url).first()
@@ -47,6 +55,7 @@ def load_suppliers(db: Session) -> int:
                 existing.platform_type  = row.get("platform_type", "custom").strip()
                 existing.discount_notes = row.get("discount_notes", "").strip()
                 existing.discount_percent = discount_pct
+                existing.discount_amount  = discount_amt
                 existing.active         = active
             else:
                 db.add(Supplier(
@@ -56,6 +65,7 @@ def load_suppliers(db: Session) -> int:
                     platform_type   = row.get("platform_type", "custom").strip(),
                     discount_notes  = row.get("discount_notes", "").strip(),
                     discount_percent= discount_pct,
+                    discount_amount = discount_amt,
                     active          = active,
                 ))
             count += 1

@@ -7,9 +7,10 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db, ScrapeJob, Supplier
+from app.database import get_db, ScrapeJob, Supplier, ScrapeSupplierResult
 from app.services import scheduler as sched
 from app.services.supplier_loader import load_suppliers
+from app.cashback_rates import get_cashback
 
 router = APIRouter()
 
@@ -68,19 +69,23 @@ def init_suppliers(db: Session = Depends(get_db)):
 @router.get("/suppliers", summary="List all suppliers with stats")
 def list_suppliers(db: Session = Depends(get_db)):
     suppliers = db.query(Supplier).order_by(Supplier.category, Supplier.name).all()
-    return [
-        {
+    result = []
+    for s in suppliers:
+        cashback = get_cashback(s.name)
+        result.append({
             "id":               s.id,
             "name":             s.name,
             "url":              s.url,
             "category":         s.category,
             "platform_type":    s.platform_type,
             "discount_percent": float(s.discount_percent or 0),
+            "discount_amount":  float(s.discount_amount or 0),
             "discount_notes":   s.discount_notes,
+            "cashback_rate":    cashback.rate,
+            "cashback_portal":  cashback.portal,
             "active":           s.active,
-        }
-        for s in suppliers
-    ]
+        })
+    return result
 
 
 @router.patch("/suppliers/{supplier_id}/toggle", summary="Enable or disable a supplier")
@@ -91,6 +96,26 @@ def toggle_supplier(supplier_id: int, db: Session = Depends(get_db)):
     s.active = not s.active
     db.commit()
     return {"id": s.id, "name": s.name, "active": s.active}
+
+
+@router.get("/{job_id}/suppliers", summary="Per-retailer scrape status for one job")
+def job_supplier_results(job_id: int, db: Session = Depends(get_db)):
+    rows = (
+        db.query(ScrapeSupplierResult)
+        .filter_by(job_id=job_id)
+        .order_by(ScrapeSupplierResult.supplier_name)
+        .all()
+    )
+    return [
+        {
+            "supplier_name":   r.supplier_name,
+            "status":          r.status,
+            "items_found":     r.items_found,
+            "error_message":   r.error_message,
+            "elapsed_seconds": float(r.elapsed_seconds) if r.elapsed_seconds is not None else None,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/history", summary="Recent scrape job history")
@@ -106,6 +131,8 @@ def job_history(limit: int = 20, db: Session = Depends(get_db)):
             "suppliers_scraped": j.suppliers_scraped,
             "skus_found": j.skus_found,
             "opportunities_found": j.opportunities_found,
+            "stockx_calls_made": j.stockx_calls_made or 0,
+            "stockx_calls_skipped": j.stockx_calls_skipped or 0,
             "error_message": j.error_message,
         }
         for j in jobs

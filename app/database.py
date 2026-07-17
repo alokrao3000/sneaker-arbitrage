@@ -1,7 +1,8 @@
+import logging
 from datetime import datetime
 from sqlalchemy import (
     create_engine, Column, Integer, String, Numeric, Boolean, DateTime,
-    Text, ForeignKey, UniqueConstraint, Index
+    Text, ForeignKey, UniqueConstraint, Index, text
 )
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
 from app.config import settings
@@ -36,6 +37,7 @@ class Supplier(Base):
     category = Column(String(100))          # footsite | tier0_qs | shopify_*
     platform_type = Column(String(50))      # shopify | footlocker | nike | custom
     discount_percent = Column(Numeric(5, 2), default=0)
+    discount_amount = Column(Numeric(10, 2), default=0)   # flat $ discount, used only when discount_percent is 0
     discount_notes = Column(Text)
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -134,9 +136,22 @@ class Opportunity(Base):
     discount_applied = Column(String(255))
 
     listing_platform = Column(String(50))       # stockx | goat
-    listing_price = Column(Numeric(10, 2))      # lowest ask on resale platform
-    payout_price = Column(Numeric(10, 2))       # listing_price * (1 - commission)
-    roi = Column(Numeric(8, 4))                 # (payout - cost) / cost * 100
+    listing_price = Column(Numeric(10, 2))      # resale price on the platform (see resale_price_type)
+    resale_price_type = Column(String(20), default="lowest_ask")  # lowest_ask | last_sale — an ask is a
+                                                # listing price, a last-sale is a cleared transaction; README §Resale price
+    payout_price = Column(Numeric(10, 2))       # listing_price - estimated seller fees
+    margin = Column(Numeric(10, 2))             # payout_price - effective_price (dollars)
+    roi = Column(Numeric(8, 4))                 # margin / cost * 100
+    market_fetched_at = Column(DateTime)        # when the market data behind this row was actually fetched
+                                                # (fresh vs cached indicator in the dashboard)
+
+    # Cashback breakdown — cost/roi above are computed against effective_price,
+    # not discounted_price, once cashback_rates.py has a real rate for this
+    # supplier. See app/services/effective_price.py.
+    cashback_rate = Column(Numeric(5, 4), default=0)     # fraction, e.g. 0.08
+    cashback_portal = Column(String(50), default="none")
+    cashback_amount = Column(Numeric(10, 2), default=0)
+    effective_price = Column(Numeric(10, 2))             # discounted_price * (1 - cashback_rate); the true ROI cost basis
 
     sales_last_7_days = Column(Integer, default=0)
     supplier_url = Column(String(1000))
@@ -163,8 +178,164 @@ class ScrapeJob(Base):
     suppliers_scraped = Column(Integer, default=0)
     skus_found = Column(Integer, default=0)
     opportunities_found = Column(Integer, default=0)
+    # StockX budget accounting — calls actually made vs skipped via the per-SKU
+    # cache gate (app/services/sku_cache.py). The API budget is shared app-wide,
+    # so this is the run's real constraint; surfaced in the dashboard summary.
+    stockx_calls_made = Column(Integer, default=0)
+    stockx_calls_skipped = Column(Integer, default=0)
     error_message = Column(Text)
+
+
+class ScrapeSupplierResult(Base):
+    """Per-retailer outcome of one scrape job — succeeded/failed/skipped, item
+    count, and timing, so the dashboard can show scrape status per retailer."""
+    __tablename__ = "scrape_supplier_results"
+
+    id = Column(Integer, primary_key=True)
+    job_id = Column(Integer, ForeignKey("scrape_jobs.id"), nullable=False, index=True)
+    supplier_name = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False)   # succeeded | failed | skipped
+    items_found = Column(Integer, default=0)
+    error_message = Column(Text)
+    elapsed_seconds = Column(Numeric(8, 2))
+    finished_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SkuMarketCache(Base):
+    """Per-SKU gate for StockX market lookups (rate-limit protection).
+
+    Tracks the lowest effective retail price ever evaluated for a SKU and the
+    verdict that evaluation produced, so re-seeing the same shoe at the same
+    (or worse) price doesn't burn another StockX call. See
+    app/services/sku_cache.py for the gating rules."""
+    __tablename__ = "sku_market_cache"
+
+    sku = Column(String(100), primary_key=True)
+    best_effective_price = Column(Numeric(10, 2))   # lowest effective price ever evaluated
+    last_verdict = Column(String(20))               # profitable | not_profitable | no_market_data
+    last_checked_at = Column(DateTime)              # last actual StockX market fetch
+    last_seen_at = Column(DateTime)                 # last time any scrape saw this SKU
+    resale_price = Column(Numeric(10, 2))           # resale price used in the last evaluation
+    resale_price_type = Column(String(20))          # lowest_ask | last_sale
+
+
+class StockXMatchFailure(Base):
+    """SKUs that could not be resolved to a StockX catalog product — logged
+    instead of silently dropped, so match-rate quality is visible."""
+    __tablename__ = "stockx_match_failures"
+
+    id = Column(Integer, primary_key=True)
+    sku = Column(String(100), nullable=False, unique=True, index=True)
+    name = Column(String(500))
+    reason = Column(String(255))          # no_search_results | no_style_match | error:<detail>
+    attempts = Column(Integer, default=1)
+    first_failed_at = Column(DateTime, default=datetime.utcnow)
+    last_failed_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StockXApiUsage(Base):
+    """One row per UTC day — persistent daily request counter for the StockX
+    API. The daily budget is per developer account and shared by every part of
+    the app (scrape runs, live SKU lookups), so it must survive restarts."""
+    __tablename__ = "stockx_api_usage"
+
+    day = Column(String(10), primary_key=True)      # 'YYYY-MM-DD' (UTC)
+    calls = Column(Integer, default=0, nullable=False)
+
+
+class StockXOAuthToken(Base):
+    """Single-row (id=1) persistence for StockX OAuth tokens. The refresh
+    token is seeded by scripts/stockx_auth.py (or STOCKX_REFRESH_TOKEN in the
+    environment) and updated here whenever StockX rotates it on refresh."""
+    __tablename__ = "stockx_oauth_tokens"
+
+    id = Column(Integer, primary_key=True)          # always 1
+    refresh_token = Column(Text)
+    access_token = Column(Text)
+    access_token_expires_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _reconcile_schema()
+
+
+def _literal_default(col) -> "str | None":
+    """SQL literal for a column's scalar Python default, or None when there is
+    no default or it's a callable (e.g. datetime.utcnow — those stay app-side)."""
+    if col.default is None or col.default.is_callable:
+        return None
+    val = col.default.arg
+    if isinstance(val, bool):
+        return "TRUE" if val else "FALSE"
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, str):
+        return "'" + val.replace("'", "''") + "'"
+    return None
+
+
+def _reconcile_schema():
+    """Schema/model reconciliation, run before anything else at startup.
+
+    create_all() only creates missing tables, never columns on tables that
+    already exist. There's no Alembic in this project, so instead of a
+    hand-maintained ALTER list (the old approach — it drifted, and scrape runs
+    died on UndefinedColumn), diff every model against the live schema and
+    ADD COLUMN IF NOT EXISTS for anything missing, then re-inspect and refuse
+    to start if any drift remains."""
+    from sqlalchemy import inspect as sa_inspect
+
+    inspector = sa_inspect(engine)
+    statements = []
+    for table in Base.metadata.sorted_tables:
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            ddl = (
+                f"ALTER TABLE {table.name} ADD COLUMN IF NOT EXISTS "
+                f"{col.name} {col.type.compile(engine.dialect)}"
+            )
+            default = _literal_default(col)
+            if default is not None:
+                ddl += f" DEFAULT {default}"
+            statements.append(ddl)
+
+    if statements:
+        with engine.begin() as conn:
+            for stmt in statements:
+                logging.getLogger(__name__).info(f"Schema reconciliation: {stmt}")
+                conn.execute(text(stmt))
+
+    # Assert: no drift may survive startup — failing loudly here beats an
+    # UndefinedColumn mid-scrape.
+    inspector = sa_inspect(engine)
+    missing = [
+        f"{table.name}.{col.name}"
+        for table in Base.metadata.sorted_tables
+        for col in table.columns
+        if col.name not in {c["name"] for c in inspector.get_columns(table.name)}
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Schema drift persists after reconciliation — refusing to start: {missing}"
+        )
+
+
+def close_orphaned_jobs():
+    """Mark jobs left in 'running' by a previous process (crash, Ctrl-C,
+    uvicorn reload) as terminal. Called at startup, before the scheduler
+    starts, so no legitimately-running job can exist yet in this process."""
+    with engine.begin() as conn:
+        result = conn.execute(text(
+            "UPDATE scrape_jobs SET status = 'error', "
+            "finished_at = COALESCE(finished_at, (NOW() AT TIME ZONE 'utc')), "
+            "error_message = 'interrupted — app restarted while job was still running' "
+            "WHERE status = 'running'"
+        ))
+        if result.rowcount:
+            logging.getLogger(__name__).warning(
+                f"Closed {result.rowcount} orphaned 'running' scrape job(s) from a previous process"
+            )
