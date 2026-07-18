@@ -1032,9 +1032,17 @@ def _fetch_ebay_context(ebay_client: EbayClient, product: ScrapedProduct,
             gtin=match.gtin if match else None,
             epid=match.epid if match else None,
         )
+        # ePID from the Catalog API when in scope, else straight from the
+        # Browse search response (live-verified it carries epid).
+        epid = (match.epid if match and match.epid
+                else stats.top_epid if stats else None)
+        # No item_id fallback here: under the basic client-credentials scope
+        # eBay returns no watchCount anywhere (live-verified 2026-07-18), so a
+        # per-SKU getItem would burn a call per product for a guaranteed None.
+        # The search-derived count lights up by itself if scope is granted.
         signal = ebay_client.get_demand_signal(
-            epid=match.epid if match else None,
-            item_id=stats.top_item_id if stats else None,
+            epid=epid,
+            watch_count=stats.top_watch_count if stats else None,
         )
         if stats is None and signal is None:
             return None

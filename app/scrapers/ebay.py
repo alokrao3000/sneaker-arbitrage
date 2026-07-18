@@ -83,7 +83,16 @@ class EbayListingStats:
     max_ask: Optional[float]
     price_type: str = "active_ask"
     sample_size: int = 0
-    top_item_id: Optional[str] = None   # feeds the watch-count lookup
+    top_item_id: Optional[str] = None   # feeds the watch-count fallback lookup
+    # Highest watchCount across the sampled listings. Requested via
+    # fieldgroups=EXTENDED, but live-verified 2026-07-18: the basic
+    # client-credentials scope returns NO watchCount at all (search or
+    # getItem), so this stays None until eBay grants a richer scope. The
+    # plumbing is kept so it lights up without code changes if that happens.
+    top_watch_count: Optional[int] = None
+    # ePID straight from the search response (live-verified present) — makes
+    # the Catalog API unnecessary for ID resolution when it is out of scope.
+    top_epid: Optional[str] = None
 
 
 @dataclass
@@ -224,8 +233,11 @@ class EbayClient:
         """Supply/price CONTEXT from live listings: count + min/median/max
         current asking price. Prefers ID-based lookups (epid > gtin) over
         free-text SKU search. Never returns sold data — there is none to get."""
+        # EXTENDED adds watchCount to each item summary (search only — the
+        # getItem endpoint 400s on this fieldgroup, live-verified 2026-07-18).
         params = {"limit": BROWSE_SAMPLE_SIZE,
-                  "filter": "conditions:{NEW},priceCurrency:USD"}
+                  "filter": "conditions:{NEW},priceCurrency:USD",
+                  "fieldgroups": "EXTENDED"}
         if epid:
             params["epid"] = epid
         elif gtin:
@@ -241,11 +253,21 @@ class EbayClient:
         items = data.get("itemSummaries") or []
         prices: List[float] = []
         top_item_id: Optional[str] = None
+        top_watch_count: Optional[int] = None
+        top_epid: Optional[str] = None
         for it in items:
             if not isinstance(it, dict):
                 continue
             if top_item_id is None and it.get("itemId"):
                 top_item_id = it["itemId"]
+            if top_epid is None and it.get("epid"):
+                top_epid = str(it["epid"])
+            try:
+                wc = int(it.get("watchCount"))
+                if top_watch_count is None or wc > top_watch_count:
+                    top_watch_count = wc
+            except (TypeError, ValueError):
+                pass
             try:
                 prices.append(float((it.get("price") or {}).get("value")))
             except (TypeError, ValueError):
@@ -256,7 +278,9 @@ class EbayClient:
         if not prices:
             return EbayListingStats(active_count=active_count, min_ask=None,
                                     median_ask=None, max_ask=None,
-                                    sample_size=0, top_item_id=top_item_id)
+                                    sample_size=0, top_item_id=top_item_id,
+                                    top_watch_count=top_watch_count,
+                                    top_epid=top_epid)
         return EbayListingStats(
             active_count=active_count,
             min_ask=min(prices),
@@ -264,16 +288,24 @@ class EbayClient:
             max_ask=max(prices),
             sample_size=len(prices),
             top_item_id=top_item_id,
+            top_watch_count=top_watch_count,
+            top_epid=top_epid,
         )
 
     # ── Marketing/Browse: soft demand signal ─────────────────────────────────
 
     def get_demand_signal(self, epid: Optional[str] = None,
-                          item_id: Optional[str] = None) -> Optional[EbayDemandSignal]:
+                          item_id: Optional[str] = None,
+                          watch_count: Optional[int] = None) -> Optional[EbayDemandSignal]:
         """Watch count + merchandised-product rank. Explicitly NOT sales
         volume — callers must keep this out of the sales gate (they do:
-        it's persisted to ebay_watch_count/ebay_demand_rank only)."""
-        watch_count = self._watch_count(item_id) if item_id else None
+        it's persisted to ebay_watch_count/ebay_demand_rank only).
+
+        watch_count normally arrives free with the listing-stats search
+        (EbayListingStats.top_watch_count); the per-item lookup is only a
+        fallback when a caller has an item_id but no search-derived count."""
+        if watch_count is None and item_id:
+            watch_count = self._watch_count(item_id)
         demand_rank = self._merchandised_rank(epid) if epid else None
         if watch_count is None and demand_rank is None:
             return None
@@ -284,9 +316,11 @@ class EbayClient:
                                 source=source)
 
     def _watch_count(self, item_id: str) -> Optional[int]:
+        # Plain getItem — no fieldgroups param: EXTENDED is search-only and
+        # the item endpoint rejects it with a 400 (live-verified 2026-07-18).
         data = self._get("browse_item",
                          EBAY_BROWSE_ITEM_URL.format(item_id=item_id),
-                         {"fieldgroups": "EXTENDED"}, context=f"item={item_id}")
+                         None, context=f"item={item_id}")
         if data is None:
             return None
         wc = data.get("watchCount")

@@ -62,14 +62,25 @@ def gate_stockx_check(db: Session, sku: str, effective_price: float,
     return GateDecision(check=False, reason=reason, cached=row)
 
 
-def record_seen(db: Session, sku: str, now: Optional[datetime] = None):
-    """A skip still proves the SKU is alive — bump last_seen_at only."""
-    now = now or datetime.utcnow()
+def _get_or_create(db: Session, sku: str) -> SkuMarketCache:
+    """The app session runs autoflush=False, and one evaluation can touch the
+    same SKU's row through several helpers (record_ebay_check early, then
+    record_seen/record_check after the size loop). Flush on create so the
+    next db.get() in the same transaction finds THIS row instead of adding a
+    second identical PK — that double-add killed 11 evaluations with
+    UniqueViolation on the 2026-07-18 validation run."""
     row = db.get(SkuMarketCache, sku)
     if row is None:
         row = SkuMarketCache(sku=sku)
         db.add(row)
-    row.last_seen_at = now
+        db.flush()
+    return row
+
+
+def record_seen(db: Session, sku: str, now: Optional[datetime] = None):
+    """A skip still proves the SKU is alive — bump last_seen_at only."""
+    now = now or datetime.utcnow()
+    _get_or_create(db, sku).last_seen_at = now
 
 
 def gate_ebay_check(db: Session, sku: str, now: Optional[datetime] = None) -> bool:
@@ -87,11 +98,7 @@ def gate_ebay_check(db: Session, sku: str, now: Optional[datetime] = None) -> bo
 
 def record_ebay_check(db: Session, sku: str, now: Optional[datetime] = None):
     now = now or datetime.utcnow()
-    row = db.get(SkuMarketCache, sku)
-    if row is None:
-        row = SkuMarketCache(sku=sku)
-        db.add(row)
-    row.ebay_last_checked_at = now
+    _get_or_create(db, sku).ebay_last_checked_at = now
 
 
 def record_check(db: Session, sku: str, effective_price: float, verdict: str,
@@ -100,10 +107,7 @@ def record_check(db: Session, sku: str, effective_price: float, verdict: str,
                  now: Optional[datetime] = None):
     """Persist the outcome of an actual StockX market fetch + evaluation."""
     now = now or datetime.utcnow()
-    row = db.get(SkuMarketCache, sku)
-    if row is None:
-        row = SkuMarketCache(sku=sku)
-        db.add(row)
+    row = _get_or_create(db, sku)
     if row.best_effective_price is None or effective_price < float(row.best_effective_price):
         row.best_effective_price = effective_price
     row.last_verdict = verdict

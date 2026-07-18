@@ -53,11 +53,12 @@ class TestListingStats:
             if request.url.path == TOKEN_PATH:
                 return token_response()
             assert request.url.path == "/buy/browse/v1/item_summary/search"
+            assert request.url.params.get("fieldgroups") == "EXTENDED"
             return httpx.Response(200, json={
                 "total": 37,
                 "itemSummaries": [
-                    {"itemId": "v1|1|0", "price": {"value": "150.00"}},
-                    {"itemId": "v1|2|0", "price": {"value": "100.00"}},
+                    {"itemId": "v1|1|0", "price": {"value": "150.00"}, "watchCount": 12},
+                    {"itemId": "v1|2|0", "price": {"value": "100.00"}, "watchCount": 31},
                     {"itemId": "v1|3|0", "price": {"value": "200.00"}},
                 ],
             })
@@ -67,6 +68,7 @@ class TestListingStats:
         assert (stats.min_ask, stats.median_ask, stats.max_ask) == (100.0, 150.0, 200.0)
         assert stats.price_type == "active_ask"     # never a sold price
         assert stats.top_item_id == "v1|1|0"
+        assert stats.top_watch_count == 31          # max across the sample
 
     def test_prefers_epid_over_free_text(self):
         seen = {}
@@ -137,6 +139,7 @@ class TestDemandSignal:
                     {"epid": "111"}, {"epid": "222"}, {"epid": "333"},
                 ]})
             if request.url.path.startswith("/buy/browse/v1/item/"):
+                assert "fieldgroups" not in request.url.params   # 400s live
                 return httpx.Response(200, json={"watchCount": 42})
             return httpx.Response(404)
 
@@ -144,6 +147,19 @@ class TestDemandSignal:
         assert sig.demand_rank == 2
         assert sig.watch_count == 42
         assert sig.source == "both"
+
+    def test_search_derived_watch_count_skips_item_lookup(self):
+        def handler(request):
+            if request.url.path == TOKEN_PATH:
+                return token_response()
+            if "merchandised_product" in request.url.path:
+                return httpx.Response(200, json={"merchandisedProducts": [{"epid": "9"}]})
+            raise AssertionError(f"unexpected call: {request.url.path}")
+
+        sig = make_client(handler).get_demand_signal(epid="9", item_id="v1|7|0",
+                                                     watch_count=17)
+        assert sig.watch_count == 17
+        assert sig.demand_rank == 1
 
 
 class TestMarketplaceInsightsStub:
