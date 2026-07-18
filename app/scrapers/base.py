@@ -39,6 +39,56 @@ VALID_US_SIZES: frozenset = frozenset({str(s) for s in [
 ]})
 
 
+# ── Inventory confidence ──────────────────────────────────────────────────────
+# Ladder replacing the old binary in_stock flag. Assignment rules:
+#   VERIFIED_CART      — this exact size passed an end-to-end add-to-cart
+#   VERIFIED_INVENTORY — the retailer's inventory endpoint explicitly confirmed
+#                        stock (and, for Shopify, the product-level cart probe
+#                        did not contradict it)
+#   INVENTORY_ONLY     — listed, but the stronger availability signal was
+#                        inconclusive (e.g. cart probe rate-limited)
+#   UNKNOWN            — no availability signal at all
+#   OUT_OF_STOCK       — a definitive negative (cart rejected: sold out)
+CONFIDENCE_VERIFIED_CART = "VERIFIED_CART"
+CONFIDENCE_VERIFIED_INVENTORY = "VERIFIED_INVENTORY"
+CONFIDENCE_INVENTORY_ONLY = "INVENTORY_ONLY"
+CONFIDENCE_UNKNOWN = "UNKNOWN"
+CONFIDENCE_OUT_OF_STOCK = "OUT_OF_STOCK"
+
+# Classified cart-validation failure reasons (persisted — keep values stable)
+CART_OK = "ok"
+CART_OUT_OF_STOCK = "out_of_stock"
+CART_SIZE_UNAVAILABLE = "size_unavailable"
+CART_REJECTED = "cart_rejected"
+CART_QUANTITY_LIMIT = "quantity_limit_exceeded"
+CART_PRODUCT_UNAVAILABLE = "product_unavailable"
+CART_SESSION_EXPIRED = "session_expired"
+CART_RATE_LIMITED = "rate_limited"          # inconclusive — NOT a stock verdict
+CART_NETWORK_ERROR = "network_error"        # inconclusive — NOT a stock verdict
+CART_UNSUPPORTED = "unsupported_retailer"
+CART_UNKNOWN_RESPONSE = "unknown_retailer_response"
+
+# Reasons that mean "we could not tell", as opposed to "definitely can't buy".
+CART_INCONCLUSIVE_REASONS = frozenset({
+    CART_RATE_LIMITED, CART_NETWORK_ERROR, CART_UNSUPPORTED, CART_UNKNOWN_RESPONSE,
+})
+
+
+@dataclass
+class CartValidationResult:
+    """Outcome of one add-to-cart attempt for a specific size variant."""
+    ok: bool
+    reason: str                          # CART_* constant above
+    cart_token: Optional[str] = None     # retailer cart/session identifier when returned
+    quantity: Optional[int] = None       # quantity the retailer confirmed in-cart
+    message: Optional[str] = None        # raw retailer response detail (truncated)
+    elapsed_ms: Optional[int] = None
+
+    @property
+    def inconclusive(self) -> bool:
+        return not self.ok and self.reason in CART_INCONCLUSIVE_REASONS
+
+
 @dataclass
 class ScrapedSize:
     size: str           # US size string, e.g. "10", "10.5", or "W8" for women's
@@ -55,9 +105,41 @@ class ScrapedProduct:
     original_price: float
     sizes: List[ScrapedSize] = field(default_factory=list)
     published_at: Optional[datetime] = None   # when the product was listed on the source site
+    image_url: Optional[str] = None           # primary product image on the source site
+    # Product-level cart probe outcome from the scrape phase (Shopify):
+    # "ok" | "blocked" | "inconclusive" | None (not probed / unsupported)
+    cart_probe: Optional[str] = None
 
     def available_sizes(self) -> List[ScrapedSize]:
         return [s for s in self.sizes if s.in_stock]
+
+    def base_confidence(self) -> str:
+        """Inventory confidence before any per-size cart validation."""
+        if not self.available_sizes():
+            return CONFIDENCE_OUT_OF_STOCK
+        if self.cart_probe == "blocked":
+            return CONFIDENCE_OUT_OF_STOCK
+        if self.cart_probe == "inconclusive":
+            return CONFIDENCE_INVENTORY_ONLY
+        # in-stock per the retailer's inventory data ("ok" probe or unsupported)
+        return CONFIDENCE_VERIFIED_INVENTORY
+
+
+@dataclass
+class ScraperStats:
+    """Per-stage counters a scraper fills during one scrape() call, so the
+    pipeline can report exactly where products were lost instead of silently
+    dropping them (discovery → classification → SKU → sizes → price)."""
+    discovered: int = 0          # raw items returned by the retailer
+    sneaker_matched: int = 0     # passed the sneaker classification
+    sku_parse_failed: int = 0    # no brand SKU could be extracted
+    size_parse_failed: int = 0   # product had no parseable sizes
+    price_parse_failed: int = 0  # no usable price found
+    parsed: int = 0              # complete ScrapedProduct emitted
+    http_retries: int = 0        # transient-failure retries performed
+    cart_probes: int = 0         # product-level cart probes attempted
+    cart_probe_blocked: int = 0  # probes that came back definitively blocked
+    cart_probe_inconclusive: int = 0
 
 
 def is_valid_sku(sku: str) -> bool:

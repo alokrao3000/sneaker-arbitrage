@@ -14,27 +14,38 @@ Auth model:
         Authorization: Bearer {access_token}
         x-api-key: {api_key}
 
-⚠ RESPONSE-SHAPE ASSUMPTIONS ─────────────────────────────────────────────────
-The endpoint paths and field names below follow StockX's public v2 docs
-(https://developer.stockx.com/portal/api-reference) but were written WITHOUT
-having seen a live response from this account (no credentials existed yet).
-Specifically assumed:
-  - GET /v2/catalog/search?query=...&pageSize=N
-        -> {"products": [{"productId", "styleId", "title", "urlKey",
-                          "productAttributes": {"colorway": ...}}, ...]}
+RESPONSE SHAPES (verified against LIVE responses on 2026-07-17) ──────────────
+  - GET /v2/catalog/search?query=...&pageNumber=1&pageSize=N
+        -> {"count", "pageNumber", "pageSize", "hasNextPage",
+            "products": [{"productId", "urlKey", "styleId", "productType",
+                          "title", "brand",
+                          "productAttributes": {"colorway", "gender",
+                                                "releaseDate", "retailPrice"}}]}
+    ⚠ styleId can be COMPOUND: "315122-111/CW2288-111" or
+      "(Cactus Jack Utopia Edition) TSUT-AF01/(...) CW2288-111" — style-code
+      matching must compare each '/'-separated segment, not the whole string.
   - GET /v2/catalog/products/{productId}/variants
-        -> [{"variantId", "variantValue" (the size, e.g. "9.5")}, ...]
+        -> [{"productId", "variantId", "variantName", "variantValue" ("9.5"),
+             "sizeChart": {"defaultConversion": {"size", "type" e.g. "us m"},
+                           "availableConversions": [...]},
+             "gtins", "isFlexEligible", "isDirectEligible"}]
   - GET /v2/catalog/products/{productId}/market-data?currencyCode=USD
-        -> [{"variantId", "lowestAskAmount", "highestBidAmount",
-             (maybe) "lastSaleAmount"}, ...]   # last-sale availability UNCONFIRMED
-Parsers are defensive: unexpected shapes log a warning with the raw top-level
-keys instead of crashing. On the FIRST live run, check the log lines tagged
-[stockx-api shape] and correct this module + README §StockX API before
-building anything else on top of the data model.
+        -> [{"productId", "variantId", "currencyCode",
+             "highestBidAmount": "35" (STRING amounts, may be null),
+             "lowestAskAmount", "sellFasterAmount", "earnMoreAmount",
+             "flexLowestAskAmount",
+             "standardMarketData"/"flexMarketData"/"directMarketData":
+                 {"lowestAsk", "highestBidAmount", "sellFaster", "earnMore"}}]
+    ⚠ There is NO last-sale field in the public market-data endpoint —
+      last_sale is always None from this source.
+Parsers stay defensive: unexpected shapes log a warning with the raw
+top-level keys instead of crashing ([stockx-api shape] log tag).
 ──────────────────────────────────────────────────────────────────────────────
 """
+import email.utils
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -46,6 +57,7 @@ from typing import List, Optional
 import httpx
 from sqlalchemy import text
 
+from app import runtime
 from app.config import settings
 from app.database import SessionLocal, StockXApiUsage, StockXOAuthToken
 from app.scrapers.stockx_market import StockXProduct, StockXSizeMarket
@@ -75,11 +87,51 @@ DAILY_SAFETY_MARGIN = 500
 # style-code lookup misses.
 FUZZY_MATCH_THRESHOLD = 0.60
 
+# ── Retry policy ──────────────────────────────────────────────────────────────
+# Transient statuses are retried with exponential backoff + jitter; 4xx client
+# errors (other than 408/429) are never retried — they will not heal on their
+# own and retrying them just burns the daily budget.
+RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+MAX_RETRIES = 4              # total attempts = 1 + MAX_RETRIES
+BACKOFF_BASE_SECONDS = 1.0   # 1s, 2s, 4s, 8s (+ jitter), capped below
+BACKOFF_CAP_SECONDS = 30.0
+
 _ALNUM_RE = re.compile(r"[^A-Z0-9]")
 
 
 class StockXBudgetExhausted(RuntimeError):
     """Raised when the shared daily request budget is used up."""
+
+
+class StockXRequestFailed(RuntimeError):
+    """A request still failed after exhausting the retry policy (or hit a
+    non-retryable client error). Carries structured context for logging."""
+
+    def __init__(self, path: str, status: "int | None", detail: str, attempts: int):
+        self.path = path
+        self.status = status
+        self.detail = detail
+        self.attempts = attempts
+        label = f"HTTP {status}" if status is not None else "transport error"
+        super().__init__(f"{label} on {path} after {attempts} attempt(s): {detail}")
+
+
+def _retry_after_seconds(resp: "httpx.Response | None") -> "float | None":
+    """Parse Retry-After (delta-seconds or HTTP-date). None when absent/bad."""
+    if resp is None:
+        return None
+    raw = resp.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+        return max(0.0, (dt - datetime.now(dt.tzinfo)).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 def is_configured() -> bool:
@@ -238,6 +290,24 @@ def _norm_style(s: str) -> str:
     return _ALNUM_RE.sub("", (s or "").upper())
 
 
+def _style_segments(style_id: str) -> List[str]:
+    """StockX styleId is often compound — '315122-111/CW2288-111' or
+    '(Cactus Jack Utopia Edition) TSUT-AF01/(...) CW2288-111' (live-verified).
+    Yield each '/'-separated segment normalized, with any parenthetical label
+    stripped, so equality matching works per style code."""
+    out = []
+    for seg in (style_id or "").split("/"):
+        seg = re.sub(r"\([^)]*\)", " ", seg)   # drop '(… Edition)' labels
+        norm = _norm_style(seg)
+        if norm:
+            out.append(norm)
+    return out
+
+
+def _style_matches(style_id: str, target_norm: str) -> bool:
+    return any(seg == target_norm for seg in _style_segments(style_id))
+
+
 def _amount(val) -> Optional[float]:
     """Amounts have been seen as numbers and as strings in StockX payloads."""
     if val is None:
@@ -255,7 +325,14 @@ class StockXAPIClient:
     ORM session."""
 
     def __init__(self):
-        self._http = httpx.Client(base_url=STOCKX_API_BASE, timeout=30)
+        self._http = httpx.Client(
+            base_url=STOCKX_API_BASE,
+            # connect fast-fail, generous read: the gateway regularly takes
+            # multi-second pauses before answering under load
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5,
+                                keepalive_expiry=30.0),
+        )
         self._shape_warned: set = set()
 
     def close(self):
@@ -266,31 +343,90 @@ class StockXAPIClient:
 
     # ── HTTP plumbing ────────────────────────────────────────────────────────
 
-    def _request(self, path: str, params: Optional[dict] = None) -> "dict | list | None":
-        _limiter.acquire()
-        headers = {
-            "Authorization": f"Bearer {_token_manager.get_access_token()}",
-            "x-api-key": settings.stockx_api_key,
-        }
-        resp = self._http.get(path, params=params, headers=headers)
+    def _request(self, path: str, params: Optional[dict] = None,
+                 context: str = "") -> "dict | list | None":
+        """GET with auth, app-wide throttle, and the retry policy above.
 
-        if resp.status_code == 401:
-            # stale/revoked access token — refresh once and retry
-            headers["Authorization"] = f"Bearer {_token_manager.get_access_token(force_refresh=True)}"
-            _limiter.acquire()
-            resp = self._http.get(path, params=params, headers=headers)
+        context tags every log line with caller context (SKU / product id) so
+        a failure in the middle of a 1000-SKU run is attributable.
+        Raises StockXRequestFailed when the request cannot be completed;
+        StockXBudgetExhausted passes through untouched.
+        """
+        auth_refreshed = False
+        start = time.perf_counter()
+        last_status: Optional[int] = None
+        last_detail = ""
 
-        if resp.status_code == 429:
-            retry_after = min(float(resp.headers.get("Retry-After", 5)), 30.0)
-            logger.warning(f"StockX 429 on {path} — backing off {retry_after:.0f}s")
-            time.sleep(retry_after)
-            _limiter.acquire()
-            resp = self._http.get(path, params=params, headers=headers)
+        attempt = 0
+        while True:
+            _limiter.acquire()   # every physical request counts vs the budget
+            headers = {
+                "Authorization": f"Bearer {_token_manager.get_access_token()}",
+                "x-api-key": settings.stockx_api_key,
+            }
+            try:
+                resp = self._http.get(path, params=params, headers=headers)
+            except httpx.TransportError as exc:
+                # DNS/connect/read failures are as transient as a 502 — same policy
+                last_status, last_detail = None, repr(exc)
+                resp = None
+            else:
+                last_status = resp.status_code
 
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return resp.json()
+                if resp.status_code == 404:
+                    return None
+                if resp.is_success:
+                    try:
+                        return resp.json()
+                    except ValueError as exc:
+                        raise StockXRequestFailed(
+                            path, resp.status_code,
+                            f"non-JSON body: {resp.text[:200]!r}", attempt + 1,
+                        ) from exc
+
+                if resp.status_code == 401 and not auth_refreshed:
+                    # Stale/revoked access token — force one refresh, don't
+                    # count it against the retry budget.
+                    logger.info(f"StockX 401 on {path} — refreshing access token "
+                                f"[{context}]")
+                    _token_manager.get_access_token(force_refresh=True)
+                    auth_refreshed = True
+                    continue
+
+                last_detail = resp.text[:300]
+                if resp.status_code not in RETRYABLE_STATUSES:
+                    logger.error(
+                        f"StockX non-retryable HTTP {resp.status_code} on {path} "
+                        f"[{context}] params={params} elapsed={time.perf_counter() - start:.1f}s "
+                        f"body={last_detail!r} headers={dict(resp.headers)}"
+                    )
+                    raise StockXRequestFailed(path, resp.status_code, last_detail, attempt + 1)
+
+            if attempt >= MAX_RETRIES:
+                logger.error(
+                    f"StockX request exhausted retries: {path} [{context}] "
+                    f"status={last_status} attempts={attempt + 1} "
+                    f"elapsed={time.perf_counter() - start:.1f}s body={last_detail!r}"
+                )
+                raise StockXRequestFailed(path, last_status, last_detail, attempt + 1)
+
+            # Exponential backoff + full jitter; Retry-After (when sane) wins.
+            delay = min(BACKOFF_CAP_SECONDS,
+                        BACKOFF_BASE_SECONDS * (2 ** attempt)) * (0.5 + random.random() / 2)
+            ra = _retry_after_seconds(resp)
+            if ra is not None:
+                delay = min(max(delay, ra), 120.0)
+            logger.warning(
+                f"StockX transient failure on {path} [{context}] "
+                f"status={last_status} attempt={attempt + 1}/{MAX_RETRIES + 1} "
+                f"retrying in {delay:.1f}s — body={last_detail[:120]!r}"
+            )
+            # Event.wait doubles as an interruptible sleep — an app shutdown
+            # aborts the backoff instead of holding a worker thread hostage.
+            if runtime.shutdown_event.wait(delay):
+                raise StockXRequestFailed(path, last_status,
+                                          "aborted: app shutdown requested", attempt + 1)
+            attempt += 1
 
     def _warn_shape(self, tag: str, payload):
         """One warning per shape mismatch per process — see module docstring."""
@@ -307,9 +443,9 @@ class StockXAPIClient:
 
     # ── Catalog matching ─────────────────────────────────────────────────────
 
-    def _search(self, query: str, page_size: int = 10) -> List[dict]:
+    def _search(self, query: str, page_size: int = 10, context: str = "") -> List[dict]:
         data = self._request("/catalog/search", {"query": query, "pageNumber": 1,
-                                                 "pageSize": page_size})
+                                                 "pageSize": page_size}, context=context)
         if data is None:
             return []
         if isinstance(data, dict) and isinstance(data.get("products"), list):
@@ -322,14 +458,17 @@ class StockXAPIClient:
         SKU/style-code equality first; name+colorway fuzzy match as fallback."""
         target = _norm_style(sku)
 
-        products = self._search(sku)
+        products = self._search(sku, context=f"sku={sku}")
+        # styleId may be compound ('315122-111/CW2288-111') — match per segment.
+        # Prefer the FIRST product whose styleId contains the target code;
+        # search relevance puts the canonical product first.
         for p in products:
-            if _norm_style(p.get("styleId", "")) == target:
+            if _style_matches(p.get("styleId", ""), target):
                 return p, "style_id", None
 
         # Fallback: fuzzy on title + colorway against the scraped name
         if name:
-            candidates = products or self._search(name)
+            candidates = products or self._search(name, context=f"sku={sku}")
             best, best_ratio = None, 0.0
             for p in candidates:
                 colorway = (p.get("productAttributes") or {}).get("colorway") or ""
@@ -348,14 +487,26 @@ class StockXAPIClient:
 
     # ── Market data ──────────────────────────────────────────────────────────
 
-    def _get_variants(self, product_id: str) -> dict:
-        """variantId -> size label."""
-        data = self._request(f"/catalog/products/{product_id}/variants")
+    def _get_variants(self, product_id: str, context: str = "") -> dict:
+        """variantId -> US size label ('9.5', or 'W8' for women's sizing).
+
+        Live shape: variantValue is the size in the product's native sizing;
+        sizeChart.defaultConversion carries {'size', 'type': 'us m'|'us w'|…}.
+        Women's sizes get the 'W' prefix to match app/scrapers/base.py's
+        normalize_size() convention used on the retail side."""
+        data = self._request(f"/catalog/products/{product_id}/variants", context=context)
         out = {}
         if isinstance(data, list):
             for v in data:
-                if isinstance(v, dict) and v.get("variantId"):
-                    out[v["variantId"]] = str(v.get("variantValue") or v.get("variantName") or "")
+                if not (isinstance(v, dict) and v.get("variantId")):
+                    continue
+                conv = (v.get("sizeChart") or {}).get("defaultConversion") or {}
+                size = str(conv.get("size") or v.get("variantValue")
+                           or v.get("variantName") or "")
+                conv_type = str(conv.get("type") or "").lower()
+                if conv_type == "us w" and size and not size.upper().startswith("W"):
+                    size = f"W{size}"
+                out[v["variantId"]] = size
         elif data is not None:
             self._warn_shape("catalog/variants", data)
         return out
@@ -376,9 +527,10 @@ class StockXAPIClient:
                 self._warn_shape("catalog/search:productId", product)
                 return StockXLookupResult(sku=sku, product=None, failure_reason="error:no_productId")
 
-            variants = self._get_variants(product_id)
+            ctx = f"sku={sku} product_id={product_id}"
+            variants = self._get_variants(product_id, context=ctx)
             market = self._request(f"/catalog/products/{product_id}/market-data",
-                                   {"currencyCode": "USD"})
+                                   {"currencyCode": "USD"}, context=ctx)
 
             sizes: List[StockXSizeMarket] = []
             rows = market if isinstance(market, list) else None
@@ -397,10 +549,11 @@ class StockXAPIClient:
                 if not isinstance(row, dict):
                     continue
                 size = variants.get(row.get("variantId"), "") or str(row.get("variantValue") or "ANY")
-                lowest_ask = _amount(row.get("lowestAskAmount"))
-                highest_bid = _amount(row.get("highestBidAmount"))
-                # ⚠ last-sale is NOT confirmed to exist in the public
-                # market-data endpoint — parsed opportunistically.
+                std = row.get("standardMarketData") or {}
+                lowest_ask = _amount(row.get("lowestAskAmount")) or _amount(std.get("lowestAsk"))
+                highest_bid = _amount(row.get("highestBidAmount")) or _amount(std.get("highestBidAmount"))
+                # Live-verified: the public market-data endpoint has NO
+                # last-sale field — this stays None unless StockX adds one.
                 last_sale = _amount(row.get("lastSaleAmount") or row.get("lastSale"))
                 if lowest_ask is None and highest_bid is None and last_sale is None:
                     continue
@@ -427,7 +580,13 @@ class StockXAPIClient:
             )
         except StockXBudgetExhausted:
             raise
+        except StockXRequestFailed as exc:
+            # Already logged in full by _request — record an attributable,
+            # queryable reason (endpoint + status) instead of a bare class name.
+            status = exc.status if exc.status is not None else "transport"
+            return StockXLookupResult(sku=sku, product=None,
+                                      failure_reason=f"error:{status}:{exc.path}")
         except Exception as exc:
-            logger.warning(f"StockX API lookup failed for {sku}: {exc!r}")
+            logger.exception(f"StockX API lookup failed for {sku} (unexpected)")
             return StockXLookupResult(sku=sku, product=None,
                                       failure_reason=f"error:{type(exc).__name__}")

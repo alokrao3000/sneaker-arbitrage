@@ -1,446 +1,571 @@
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BrickFinder — Dashboard</title>
-  <!-- Bootstrap 5 dark -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" />
-  <!-- DataTables -->
-  <link rel="stylesheet" href="https://cdn.datatables.net/2.0.3/css/dataTables.bootstrap5.min.css" />
-  <!-- Bootstrap Icons -->
+  <title>BrickFinder — Arbitrage Dashboard</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
 
   <style>
+    /* ── Design tokens: calm neutral palette, muted accents ── */
     :root {
-      --accent: #00e5a0;
-      --accent-dim: #00b37a;
-      --danger: #ff4d4d;
-      --warn: #ffc107;
-      --bg-card: #1a1d23;
-      --bg-row-hover: #22262f;
+      --bg:            #f4f5f7;
+      --surface:       #ffffff;
+      --surface-2:     #f9fafb;
+      --border:        #e5e8ec;
+      --border-strong: #d5dae1;
+      --text:          #21272f;
+      --text-2:        #5b6472;
+      --text-3:        #8b93a1;
+      --accent:        #3d5a94;   /* muted blue */
+      --accent-soft:   #eef2f9;
+      --green:         #2e7d5b;   /* muted green — profit */
+      --green-soft:    #e9f4ef;
+      --amber:         #9a7422;
+      --amber-soft:    #faf3e2;
+      --red:           #a8524a;   /* muted red */
+      --red-soft:      #f9ecea;
+      --shadow:        0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+      --shadow-hover:  0 4px 10px rgba(16,24,40,.08), 0 2px 4px rgba(16,24,40,.05);
+      --radius:        12px;
     }
-
-    body { background: #12141a; font-family: 'Segoe UI', system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter", -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button { font-family: inherit; }
 
     /* ── Header ── */
     .header {
-      background: linear-gradient(135deg, #0f1117 0%, #1a1d23 100%);
-      border-bottom: 1px solid #2a2d35;
-      padding: 14px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      flex-wrap: wrap;
+      position: sticky; top: 0; z-index: 50;
     }
-    .brand { font-size: 1.25rem; font-weight: 700; color: var(--accent); letter-spacing: 0.04em; }
-    .brand span { color: #fff; }
+    .brand { font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
+    .brand .logo {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: var(--accent); color: #fff;
+      display: inline-flex; align-items: center; justify-content: center; font-size: .95rem;
+    }
+    .brand small { color: var(--text-3); font-weight: 500; }
+    .header-meta { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .last-updated { font-size: .78rem; color: var(--text-3); }
 
-    /* ── Stat cards ── */
-    .stat-card {
-      background: var(--bg-card);
-      border: 1px solid #2a2d35;
-      border-radius: 10px;
-      padding: 16px 20px;
+    .btn {
+      border: 1px solid var(--border-strong);
+      background: var(--surface);
+      color: var(--text);
+      border-radius: 9px;
+      padding: 8px 16px;
+      font-size: .82rem; font-weight: 600;
+      cursor: pointer;
+      transition: background .15s ease, box-shadow .15s ease, border-color .15s ease;
     }
-    .stat-label { font-size: .75rem; color: #8b8fa8; text-transform: uppercase; letter-spacing: .08em; }
-    .stat-value { font-size: 1.6rem; font-weight: 700; color: #fff; line-height: 1.1; }
-    .stat-value.green { color: var(--accent); }
-    .stat-value.yellow { color: var(--warn); }
-
-    /* ── Filter bar ── */
-    .filter-bar {
-      background: var(--bg-card);
-      border: 1px solid #2a2d35;
-      border-radius: 10px;
-      padding: 12px 16px;
-    }
-    .filter-bar label { font-size: .75rem; color: #8b8fa8; }
-    .filter-bar .form-control, .filter-bar .form-select {
-      background: #12141a; border-color: #2a2d35; color: #e0e4f0; font-size: .85rem;
-    }
-    .filter-bar .form-control:focus, .filter-bar .form-select:focus {
-      border-color: var(--accent); box-shadow: 0 0 0 2px rgba(0,229,160,.15);
-    }
-
-    /* ── Table ── */
-    #opps-table_wrapper .dataTables_filter input,
-    #opps-table_wrapper .dataTables_length select {
-      background: #1a1d23; border: 1px solid #2a2d35; color: #e0e4f0;
-      border-radius: 6px; padding: 4px 8px;
-    }
-    #opps-table { font-size: .83rem; }
-    #opps-table thead th {
-      background: #0f1117; color: #8b8fa8;
-      border-bottom: 2px solid #2a2d35;
-      font-size: .7rem; text-transform: uppercase; letter-spacing: .07em;
-      white-space: nowrap;
-    }
-    #opps-table tbody tr { border-bottom: 1px solid #1e212a; }
-    #opps-table tbody tr:hover td { background: var(--bg-row-hover); }
-
-    .roi-high   { color: var(--accent);  font-weight: 700; }
-    .roi-medium { color: var(--warn);    font-weight: 600; }
-    .roi-low    { color: #e0e4f0;        font-weight: 500; }
-
-    .badge-stockx { background: #3b6aff; font-size: .7rem; }
-    .badge-goat   { background: #ff5c00; font-size: .7rem; }
-
-    /* ── Progress panel ── */
-    #progress-panel {
-      background: #0f1117;
-      border: 1px solid #2a2d35;
-      border-radius: 10px;
-      font-family: 'Cascadia Code', 'Consolas', monospace;
-      font-size: .78rem;
-      color: #8b8fa8;
-      height: 220px;
-      overflow-y: auto;
-      padding: 12px;
-      display: none;
-    }
-    #progress-panel .line-ok   { color: var(--accent); }
-    #progress-panel .line-err  { color: var(--danger); }
-    #progress-panel .line-info { color: #e0e4f0; }
+    .btn:hover { background: var(--surface-2); border-color: var(--text-3); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #34507f; border-color: #34507f; }
 
     .pulse {
       display: inline-block; width: 8px; height: 8px;
-      background: var(--accent); border-radius: 50%;
-      animation: pulse 1.2s ease-in-out infinite;
+      background: var(--green); border-radius: 50%;
+      animation: pulse 1.2s ease-in-out infinite; margin-right: 6px;
     }
-    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    #running-indicator { font-size: .78rem; color: var(--green); font-weight: 600; }
 
-    /* ── Misc ── */
-    .btn-run {
-      background: var(--accent); color: #0f1117; font-weight: 700;
-      border: none; border-radius: 8px; padding: 8px 18px;
+    .page { max-width: 1440px; margin: 0 auto; padding: 22px 28px 40px; }
+
+    /* ── Stat tiles ── */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .stat {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px 18px;
     }
-    .btn-run:hover { background: var(--accent-dim); color: #0f1117; }
-    .btn-run:disabled { opacity: .5; cursor: not-allowed; }
+    .stat-label { font-size: .68rem; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 4px; }
+    .stat-value { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+    .stat-sub { font-size: .72rem; color: var(--text-3); margin-top: 3px; }
+    .stat-value.green { color: var(--green); }
+    .stat-value.amber { color: var(--amber); }
 
-    .last-updated { font-size: .75rem; color: #8b8fa8; }
-    a.table-link  { color: #6c9eff; text-decoration: none; }
-    a.table-link:hover { text-decoration: underline; }
+    /* ── Filter bar ── */
+    .filters {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px 18px;
+      margin-bottom: 18px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+    .filters label { display: block; font-size: .68rem; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 5px; }
+    .filters input, .filters select {
+      width: 100%;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: .82rem;
+      padding: 7px 10px;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    .filters input:focus, .filters select:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(61,90,148,.12);
+    }
 
-    .shoe-name { max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* ── Progress console ── */
+    #progress-panel {
+      background: #263041;
+      border-radius: var(--radius);
+      font-family: "Cascadia Code", Consolas, monospace;
+      font-size: .76rem;
+      color: #aeb8c8;
+      height: 220px; overflow-y: auto;
+      padding: 12px 14px;
+      margin-bottom: 18px;
+      display: none;
+      box-shadow: var(--shadow);
+    }
+    #progress-panel .line-ok  { color: #7fd0a8; }
+    #progress-panel .line-err { color: #e8a19a; }
+    #progress-panel .line-info{ color: #d6dce6; }
+
+    /* ── Panels (supplier status) ── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+      overflow: hidden;
+    }
+    .panel-title { padding: 10px 18px; border-bottom: 1px solid var(--border); font-size: .7rem; font-weight: 600; color: var(--text-3); text-transform: uppercase; letter-spacing: .07em; }
+    .panel table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+    .panel th { text-align: left; padding: 8px 18px; color: var(--text-3); font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border); font-weight: 600; }
+    .panel td { padding: 8px 18px; border-bottom: 1px solid var(--surface-2); color: var(--text-2); }
+    .panel .scroll { max-height: 240px; overflow-y: auto; }
+
+    /* ── Toolbar above cards ── */
+    .list-toolbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; gap: 12px; flex-wrap: wrap; }
+    .list-toolbar h2 { font-size: .95rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+    .list-count { font-size: .78rem; color: var(--text-3); }
+
+    /* ── Opportunity cards ── */
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      transition: box-shadow .18s ease, transform .18s ease;
+    }
+    .card:hover { box-shadow: var(--shadow-hover); transform: translateY(-1px); }
+
+    .card-head { display: flex; gap: 12px; padding: 14px 16px 10px; }
+    .card-img {
+      width: 64px; height: 64px; flex: none;
+      border-radius: 10px; background: var(--surface-2);
+      border: 1px solid var(--border);
+      object-fit: contain; padding: 4px;
+    }
+    .card-img.placeholder { display: flex; align-items: center; justify-content: center; color: var(--text-3); font-size: 1.3rem; }
+    .card-title { font-size: .86rem; font-weight: 600; line-height: 1.3; margin: 0 0 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .card-sub { font-size: .74rem; color: var(--text-3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .card-sub code { background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; font-size: .7rem; color: var(--text-2); }
+
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 16px 10px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: .66rem; font-weight: 600;
+      border-radius: 999px; padding: 3px 9px;
+      background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border);
+    }
+    .chip.green { background: var(--green-soft); color: var(--green); border-color: transparent; }
+    .chip.amber { background: var(--amber-soft); color: var(--amber); border-color: transparent; }
+    .chip.red   { background: var(--red-soft);   color: var(--red);   border-color: transparent; }
+    .chip.blue  { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
+
+    .card-section { border-top: 1px solid var(--border); padding: 10px 16px; }
+    .section-label { font-size: .64rem; font-weight: 700; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; }
+    .section-label a { font-size: .72rem; font-weight: 600; text-transform: none; letter-spacing: 0; }
+    .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+    .kv { display: flex; justify-content: space-between; font-size: .78rem; }
+    .kv .k { color: var(--text-2); }
+    .kv .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .kv .v.muted { color: var(--text-3); font-weight: 500; }
+    .kv .v.strike { text-decoration: line-through; color: var(--text-3); font-weight: 500; }
+
+    .card-footer {
+      border-top: 1px solid var(--border);
+      background: var(--surface-2);
+      padding: 12px 16px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      margin-top: auto;
+    }
+    .profit-block .profit { font-size: 1.15rem; font-weight: 700; color: var(--green); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+    .profit-block .profit.low { color: var(--text); }
+    .profit-block .roi { font-size: .72rem; color: var(--text-2); }
+    .buy-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--accent); color: #fff !important;
+      border-radius: 8px; padding: 7px 14px;
+      font-size: .78rem; font-weight: 600;
+      transition: background .15s ease;
+    }
+    .buy-link:hover { background: #34507f; text-decoration: none; }
+
+    .empty {
+      text-align: center; color: var(--text-3);
+      padding: 70px 20px; background: var(--surface);
+      border: 1px dashed var(--border-strong); border-radius: var(--radius);
+      grid-column: 1 / -1;
+    }
+    .empty i { font-size: 1.8rem; display: block; margin-bottom: 10px; }
+
+    .footer-note { text-align: center; margin-top: 26px; color: var(--text-3); font-size: .7rem; line-height: 1.7; }
+
+    /* ── Toasts ── */
+    .toast {
+      position: fixed; bottom: 18px; right: 18px; z-index: 999;
+      background: var(--surface); color: var(--text);
+      border: 1px solid var(--border-strong); border-left: 4px solid var(--accent);
+      border-radius: 10px; box-shadow: var(--shadow-hover);
+      padding: 11px 16px; font-size: .82rem; font-weight: 500;
+    }
+    .toast.success { border-left-color: var(--green); }
+    .toast.warning { border-left-color: var(--amber); }
+    .toast.danger  { border-left-color: var(--red); }
   </style>
 </head>
 <body>
 
-<!-- ── Header ── -->
-<div class="header d-flex align-items-center justify-content-between">
-  <div class="brand">Brick<span>Finder</span> <span style="color:#8b8fa8;font-weight:400;font-size:.9rem">/ Arbitrage</span></div>
-  <div class="d-flex align-items-center gap-3">
+<header class="header">
+  <div class="brand">
+    <span class="logo"><i class="bi bi-graph-up-arrow"></i></span>
+    BrickFinder <small>Sneaker Arbitrage</small>
+  </div>
+  <div class="header-meta">
     <span class="last-updated" id="last-updated">–</span>
-    <span id="running-indicator" style="display:none"><span class="pulse"></span> <small class="text-success">Scraping…</small></span>
-    <button class="btn btn-sm me-1" id="btn-quick" onclick="triggerQuickScan()"
-      style="background:#1e3a2a;color:var(--accent);border:1px solid var(--accent-dim);border-radius:8px;padding:8px 16px;font-weight:600">
-      <i class="bi bi-lightning-fill"></i> Quick Scan (Tier 0)
+    <span id="running-indicator" style="display:none"><span class="pulse"></span>Scraping…</span>
+    <button class="btn" id="btn-quick" onclick="triggerQuickScan()">
+      <i class="bi bi-lightning-charge"></i> Quick Scan
     </button>
-    <button class="btn btn-run" id="btn-run" onclick="triggerScrape()">
+    <button class="btn btn-primary" id="btn-run" onclick="triggerScrape()">
       <i class="bi bi-play-fill"></i> Run Full Scrape
     </button>
   </div>
-</div>
+</header>
 
-<div class="container-fluid p-3">
+<div class="page">
 
-  <!-- ── Stats row ── -->
-  <div class="row g-3 mb-3" id="stats-row">
-    <div class="col-6 col-md">
-      <div class="stat-card">
-        <div class="stat-label">Opportunities</div>
-        <div class="stat-value green" id="stat-opps">—</div>
-      </div>
+  <!-- ── Stats ── -->
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-label">Opportunities</div>
+      <div class="stat-value" id="stat-opps">—</div>
+      <div class="stat-sub" id="stat-liquid">— confirmed liquid</div>
     </div>
-    <div class="col-6 col-md">
-      <div class="stat-card">
-        <div class="stat-label">Avg ROI</div>
-        <div class="stat-value green" id="stat-avg-roi">—</div>
-      </div>
+    <div class="stat">
+      <div class="stat-label">Avg ROI</div>
+      <div class="stat-value green" id="stat-avg-roi">—</div>
     </div>
-    <div class="col-6 col-md">
-      <div class="stat-card">
-        <div class="stat-label">Best ROI</div>
-        <div class="stat-value yellow" id="stat-best-roi">—</div>
-      </div>
+    <div class="stat">
+      <div class="stat-label">Best ROI</div>
+      <div class="stat-value" id="stat-best-roi">—</div>
     </div>
-    <div class="col-6 col-md">
-      <div class="stat-card">
-        <div class="stat-label">Active Suppliers</div>
-        <div class="stat-value" id="stat-suppliers">—</div>
-      </div>
+    <div class="stat">
+      <div class="stat-label">Active Retailers</div>
+      <div class="stat-value" id="stat-suppliers">—</div>
     </div>
-    <div class="col-6 col-md">
-      <div class="stat-card">
-        <div class="stat-label">StockX Budget (Today)</div>
-        <div class="stat-value" id="stat-stockx-budget">—</div>
-        <div style="font-size:.7rem;color:#8b8fa8" id="stat-stockx-run">last run: —</div>
-      </div>
+    <div class="stat">
+      <div class="stat-label">StockX Budget Today</div>
+      <div class="stat-value" id="stat-stockx-budget">—</div>
+      <div class="stat-sub" id="stat-stockx-run">last run: —</div>
     </div>
   </div>
 
   <!-- ── Filters ── -->
-  <div class="filter-bar mb-3">
-    <div class="row g-2 align-items-end">
-      <div class="col-6 col-md-2">
-        <label>Min ROI %</label>
-        <input type="number" class="form-control form-control-sm" id="f-roi" value="5" min="0" step="1" />
-      </div>
-      <div class="col-6 col-md-2">
-        <label>Min 7-Day Sales</label>
-        <input type="number" class="form-control form-control-sm" id="f-sales" value="0" min="0" />
-      </div>
-      <div class="col-6 col-md-2">
-        <label>Platform</label>
-        <select class="form-select form-select-sm" id="f-platform">
-          <option value="">All</option>
-          <option value="stockx">StockX</option>
-          <option value="goat">GOAT</option>
-        </select>
-      </div>
-      <div class="col-6 col-md-2">
-        <label>Supplier</label>
-        <input type="text" class="form-control form-control-sm" id="f-supplier" placeholder="Any supplier…" />
-      </div>
-      <div class="col-6 col-md-2">
-        <label>SKU</label>
-        <input type="text" class="form-control form-control-sm" id="f-sku" placeholder="e.g. CW2288-111" />
-      </div>
-      <div class="col-6 col-md-2">
-        <button class="btn btn-sm w-100" style="background:#2a2d35;color:#e0e4f0" onclick="loadOpportunities()">
-          <i class="bi bi-funnel"></i> Apply
-        </button>
-      </div>
+  <div class="filters">
+    <div><label>Min ROI %</label><input type="number" id="f-roi" value="5" min="0" step="1" /></div>
+    <div><label>Min Profit $</label><input type="number" id="f-profit" value="0" min="0" step="1" /></div>
+    <div><label>Min Sales / 7d</label><input type="number" id="f-sales7" value="0" min="0" /></div>
+    <div><label>Min Sales / 30d</label><input type="number" id="f-sales30" value="0" min="0" /></div>
+    <div>
+      <label>Liquidity</label>
+      <select id="f-liquidity">
+        <option value="">All surfaced</option>
+        <option value="eligible">Confirmed liquid only</option>
+      </select>
+    </div>
+    <div>
+      <label>Platform</label>
+      <select id="f-platform">
+        <option value="">All</option>
+        <option value="stockx">StockX</option>
+        <option value="goat">GOAT</option>
+      </select>
+    </div>
+    <div><label>Retailer</label><input type="text" id="f-supplier" placeholder="Any retailer…" /></div>
+    <div><label>Brand / Model</label><input type="text" id="f-brand" placeholder="e.g. Jordan" /></div>
+    <div><label>SKU</label><input type="text" id="f-sku" placeholder="CW2288-111" /></div>
+    <div>
+      <label>Sort By</label>
+      <select id="f-sort">
+        <option value="best">Best (profit × liquidity)</option>
+        <option value="newest">Newest</option>
+        <option value="margin">Highest profit</option>
+        <option value="roi">Highest ROI</option>
+      </select>
+    </div>
+    <div><label>&nbsp;</label>
+      <button class="btn" style="width:100%" onclick="loadOpportunities()"><i class="bi bi-funnel"></i> Apply</button>
     </div>
   </div>
 
-  <!-- ── Progress panel ── -->
-  <div id="progress-panel" class="mb-3"></div>
+  <!-- ── Progress console ── -->
+  <div id="progress-panel"></div>
 
-  <!-- ── Per-retailer scrape status (last job) ── -->
-  <div class="bg-dark rounded mb-3" id="supplier-status-panel" style="border:1px solid #2a2d35;overflow:hidden;display:none">
-    <div class="px-3 py-2" style="border-bottom:1px solid #2a2d35;color:#8b8fa8;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em">
-      Per-Retailer Status — Last Scrape
-    </div>
-    <div style="max-height:260px;overflow-y:auto">
-      <table class="table table-dark table-sm mb-0" style="font-size:.8rem">
-        <thead>
-          <tr>
-            <th>Retailer</th>
-            <th>Status</th>
-            <th>Items Found</th>
-            <th>Time</th>
-            <th>Error</th>
-          </tr>
-        </thead>
+  <!-- ── Per-retailer status ── -->
+  <div class="panel" id="supplier-status-panel" style="display:none">
+    <div class="panel-title">Per-Retailer Status — Last Scrape</div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Retailer</th><th>Status</th><th>Items</th><th>Time</th><th>Error</th></tr></thead>
         <tbody id="supplier-status-body"></tbody>
       </table>
     </div>
   </div>
 
-  <!-- ── Main table ── -->
-  <div class="bg-dark rounded" style="border:1px solid #2a2d35;overflow:hidden">
-    <table id="opps-table" class="table table-dark table-hover mb-0 w-100">
-      <thead>
-        <tr>
-          <th>Shoe Name</th>
-          <th>SKU</th>
-          <th>Size</th>
-          <th>Supplier</th>
-          <th>Original $</th>
-          <th>Discounted $</th>
-          <th>Cashback</th>
-          <th>Effective $</th>
-          <th>Platform</th>
-          <th>Resale $</th>
-          <th>Payout $</th>
-          <th>Margin $</th>
-          <th>ROI %</th>
-          <th>7D Sales</th>
-          <th>Links</th>
-        </tr>
-      </thead>
-      <tbody id="opps-body"></tbody>
-    </table>
+  <!-- ── Opportunity cards ── -->
+  <div class="list-toolbar">
+    <h2>Opportunities</h2>
+    <span class="list-count" id="list-count"></span>
   </div>
+  <div class="cards" id="cards"></div>
 
-  <!-- ── Footer ── -->
-  <div class="text-center mt-3" style="color:#4a4e5e;font-size:.72rem">
-    StockX fees: level-based transaction fee + 3% processing + shipping (app/stockx_fees.py) · Effective $ = (List × (1 − discount)) × (1 − cashback) · Margin $ = Resale − fees − Effective $ · Opportunity when Margin &gt; min threshold · ● fresh / ● cached StockX data · Auto-refresh every 5 min
+  <div class="footer-note">
+    Effective $ = (List × (1 − discount)) × (1 − cashback) &nbsp;·&nbsp; Net profit = Payout − Effective $ &nbsp;·&nbsp;
+    StockX fees: level-based transaction fee + 3% processing + shipping<br/>
+    Liquidity gate: surfaced products need ≥1 sale in 7 days or ≥5 sales in 30 days (or a live bid when no sales source is available)
+    &nbsp;·&nbsp; Auto-refresh every 5 min
   </div>
 </div>
 
-<!-- ── Scripts ── -->
-<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.datatables.net/2.0.3/js/dataTables.min.js"></script>
-<script src="https://cdn.datatables.net/2.0.3/js/dataTables.bootstrap5.min.js"></script>
-
 <script>
-// ── DataTable init ────────────────────────────────────────────────────────────
-let dt;
-$(document).ready(function () {
-  dt = $('#opps-table').DataTable({
-    paging: true,
-    pageLength: 50,
-    lengthMenu: [25, 50, 100, 250],
-    searching: true,
-    order: [[11, 'desc'], [12, 'desc']],   // Margin $ desc, then ROI desc — best flips on top
-    language: { emptyTable: 'No opportunities found — run a scrape to get started.' },
-    columnDefs: [
-      { orderable: false, targets: [14] },  // Links column not sortable
-      { type: 'num', targets: [4, 5, 7, 9, 10, 11, 12, 13] },
-    ]
-  });
-
+// ── Boot ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
   loadStats();
   loadOpportunities();
   loadSupplierStatus();
-
-  // Auto-refresh every 5 minutes
   setInterval(() => { loadStats(); loadOpportunities(); }, 5 * 60 * 1000);
-  // Poll job status every 3 seconds
   setInterval(pollJobStatus, 3000);
 });
 
-
-// ── Data loading ──────────────────────────────────────────────────────────────
+// ── Data loading ─────────────────────────────────────────────────────────────
 async function loadStats() {
   try {
     const r = await fetch('/api/opportunities/stats');
     const d = await r.json();
-    document.getElementById('stat-opps').textContent     = d.total_opportunities ?? '0';
-    document.getElementById('stat-avg-roi').textContent  = d.avg_roi ? d.avg_roi.toFixed(1) + '%' : '—';
-    document.getElementById('stat-best-roi').textContent = d.best_roi ? d.best_roi.toFixed(1) + '%' : '—';
-    document.getElementById('stat-suppliers').textContent= d.total_active_suppliers ?? '—';
+    setText('stat-opps', d.total_opportunities ?? '0');
+    setText('stat-liquid', (d.liquid_opportunities ?? 0) + ' confirmed liquid');
+    setText('stat-avg-roi', d.avg_roi ? d.avg_roi.toFixed(1) + '%' : '—');
+    setText('stat-best-roi', d.best_roi ? d.best_roi.toFixed(1) + '%' : '—');
+    setText('stat-suppliers', d.total_active_suppliers ?? '—');
 
     if (d.last_job?.finished_at) {
-      const t = new Date(d.last_job.finished_at);
-      document.getElementById('last-updated').textContent =
-        'Last updated ' + t.toLocaleTimeString();
+      setText('last-updated', 'Last updated ' + new Date(d.last_job.finished_at).toLocaleTimeString());
     }
-
-    // StockX budget — API requests used today vs the daily limit, plus the
-    // last run's lookup accounting (made vs skipped by the SKU cache).
     const budgetEl = document.getElementById('stat-stockx-budget');
     if (d.stockx_budget) {
-      budgetEl.textContent =
-        d.stockx_budget.calls_today.toLocaleString() + ' / ' + d.stockx_budget.daily_limit.toLocaleString();
-      budgetEl.className = 'stat-value ' +
-        (d.stockx_budget.calls_today / d.stockx_budget.daily_limit > 0.8 ? 'yellow' : 'green');
+      budgetEl.textContent = d.stockx_budget.calls_today.toLocaleString() + ' / ' + d.stockx_budget.daily_limit.toLocaleString();
+      budgetEl.className = 'stat-value ' + (d.stockx_budget.calls_today / d.stockx_budget.daily_limit > 0.8 ? 'amber' : '');
     } else {
       budgetEl.textContent = 'API off';
-      budgetEl.className = 'stat-value';
       budgetEl.title = 'StockX official API not configured — using browser scraper';
     }
     if (d.last_job) {
-      document.getElementById('stat-stockx-run').textContent =
-        `last run: ${d.last_job.stockx_calls_made ?? 0} lookups, ${d.last_job.stockx_calls_skipped ?? 0} skipped (cache)`;
+      setText('stat-stockx-run',
+        `last run: ${d.last_job.stockx_calls_made ?? 0} lookups, ${d.last_job.stockx_calls_skipped ?? 0} cached`);
     }
   } catch (e) { console.warn('Stats load failed', e); }
 }
 
 async function loadOpportunities() {
   const params = new URLSearchParams({
-    min_roi:   document.getElementById('f-roi').value   || 20,
-    min_sales: document.getElementById('f-sales').value || 0,
-    platform:  document.getElementById('f-platform').value,
-    supplier:  document.getElementById('f-supplier').value,
-    sku:       document.getElementById('f-sku').value,
-    limit:     500,
+    min_roi:       val('f-roi', 5),
+    min_profit:    val('f-profit', 0),
+    min_sales_7d:  val('f-sales7', 0),
+    min_sales_30d: val('f-sales30', 0),
+    liquidity:     val('f-liquidity', ''),
+    platform:      val('f-platform', ''),
+    supplier:      val('f-supplier', ''),
+    brand:         val('f-brand', ''),
+    sku:           val('f-sku', ''),
+    sort_by:       val('f-sort', 'best'),
+    limit:         500,
   });
-
   try {
     const r = await fetch('/api/opportunities/?' + params);
-    const rows = await r.json();
-    renderTable(rows);
-  } catch (e) {
-    console.warn('Opportunities load failed', e);
+    renderCards(await r.json());
+  } catch (e) { console.warn('Opportunities load failed', e); }
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+function liquidityChip(o) {
+  if (o.liquidity_status === 'eligible') {
+    const bits = [];
+    if (o.sales_last_7_days != null)  bits.push(o.sales_last_7_days + '/7d');
+    if (o.sales_last_30_days != null) bits.push(o.sales_last_30_days + '/30d');
+    return `<span class="chip green" title="Meets the sales-liquidity rule: ≥1 sale in 7 days or ≥5 in 30 days"><i class="bi bi-droplet-fill"></i> Liquid${bits.length ? ' · ' + bits.join(' · ') : ''}</span>`;
+  }
+  return `<span class="chip" title="No sales-history source available for this product — surfaced on a live-bid demand proxy"><i class="bi bi-droplet"></i> Liquidity unknown</span>`;
+}
+
+function confidenceChip(o) {
+  const map = { high: ['green', 'High confidence'], medium: ['amber', 'Medium confidence'], low: ['red', 'Low confidence'] };
+  const [cls, label] = map[o.confidence] || ['', o.confidence];
+  return `<span class="chip ${cls}" title="Margin trust: freshness of market data × whether it's priced from a live ask"><i class="bi bi-shield-check"></i> ${label}</span>`;
+}
+
+function stockChip(o) {
+  switch (o.inventory_confidence) {
+    case 'VERIFIED_CART':      return '<span class="chip green" title="This exact size passed a real add-to-cart check"><i class="bi bi-cart-check"></i> Cart verified</span>';
+    case 'VERIFIED_INVENTORY': return '<span class="chip blue" title="Retailer inventory confirms stock; cart not verifiable"><i class="bi bi-box-seam"></i> In stock</span>';
+    case 'OUT_OF_STOCK':       return '<span class="chip red" title="Cart validation was rejected"><i class="bi bi-x-circle"></i> Out of stock</span>';
+    default:                   return '<span class="chip" title="Availability signal weak or unknown"><i class="bi bi-question-circle"></i> Stock unknown</span>';
   }
 }
 
-function renderTable(rows) {
-  dt.clear();
-  rows.forEach(o => {
-    const roiClass = o.roi >= 40 ? 'roi-high' : o.roi >= 25 ? 'roi-medium' : 'roi-low';
-    const marginClass = o.margin >= 30 ? 'roi-high' : o.margin >= 15 ? 'roi-medium' : 'roi-low';
-    const platformBadge = o.listing_platform === 'stockx'
-      ? '<span class="badge badge-stockx">STOCKX</span>'
-      : '<span class="badge badge-goat">GOAT</span>';
-
-    // ask = live listing price; sale = last cleared transaction
-    const typeBadge = o.resale_price_type === 'last_sale'
-      ? '<span class="badge" style="background:#6b4bd6;font-size:.62rem" title="Last cleared sale — real transaction, possibly stale">SALE</span>'
-      : '<span class="badge" style="background:#2a2d35;color:#9fb5ff;font-size:.62rem" title="Lowest ask — a live listing, not a cleared sale">ASK</span>';
-    const freshDot = o.market_is_fresh
-      ? '<span title="StockX data fetched within the market TTL" style="color:var(--accent)">●</span>'
-      : `<span title="Cached StockX data${o.market_fetched_at ? ' — fetched ' + new Date(o.market_fetched_at).toLocaleString() : ''}" style="color:#4a4e5e">●</span>`;
-
-    const links = [
-      o.supplier_url ? `<a class="table-link" href="${o.supplier_url}" target="_blank"><i class="bi bi-bag"></i> Buy</a>` : '',
-      o.market_url   ? `<a class="table-link ms-2" href="${o.market_url}" target="_blank"><i class="bi bi-graph-up"></i> List</a>` : '',
-    ].filter(Boolean).join('');
-
-    const cashbackCell = o.cashback_rate > 0
-      ? `$${fmt(o.cashback_amount)}<br><small style="color:#8b8fa8">${(o.cashback_rate * 100).toFixed(1)}% via ${esc(o.cashback_portal)}</small>`
-      : '<span style="color:#4a4e5e">—</span>';
-
-    dt.row.add([
-      `<div class="shoe-name" title="${esc(o.shoe_name)}">${esc(o.shoe_name)}</div>`,
-      `<code style="font-size:.78rem">${esc(o.sku)}</code>`,
-      o.size,
-      `<span title="${esc(o.supplier_name)}">${esc(o.supplier_name)}</span>`,
-      '$' + fmt(o.original_price),
-      `<span style="color:var(--accent)">$${fmt(o.discounted_price)}</span>` +
-        (o.discount_applied ? `<br><small style="color:#8b8fa8">${esc(o.discount_applied)}</small>` : ''),
-      cashbackCell,
-      `<strong>$${fmt(o.effective_price)}</strong>`,
-      platformBadge,
-      `$${fmt(o.listing_price)} ${typeBadge} ${freshDot}`,
-      `<strong>$${fmt(o.payout_price)}</strong>`,
-      `<span class="${marginClass}">$${fmt(o.margin ?? 0)}</span>`,
-      `<span class="${roiClass}">${o.roi.toFixed(1)}%</span>`,
-      o.sales_last_7_days,
-      links,
-    ]);
-  });
-  dt.draw();
+function renderCards(rows) {
+  const wrap = document.getElementById('cards');
+  setText('list-count', rows.length ? `${rows.length} result${rows.length === 1 ? '' : 's'}` : '');
+  if (!rows.length) {
+    wrap.innerHTML = `<div class="empty"><i class="bi bi-inboxes"></i>
+      No opportunities match the current filters.<br/>
+      <small>Run a scrape, or relax the ROI / liquidity filters.</small></div>`;
+    return;
+  }
+  wrap.innerHTML = rows.map(cardHTML).join('');
 }
 
+function cardHTML(o) {
+  const platform = (o.listing_platform || 'stockx').toUpperCase();
+  const fresh = o.market_is_fresh
+    ? '<span title="Market data fetched within the TTL" style="color:var(--green)">●</span>'
+    : `<span title="Cached market data${o.market_fetched_at ? ' — fetched ' + new Date(o.market_fetched_at).toLocaleString() : ''}" style="color:var(--text-3)">●</span>`;
+  const priceType = o.resale_price_type === 'last_sale'
+    ? '<span class="chip amber" style="padding:1px 7px" title="Priced from the last cleared sale — real, possibly stale">last sale</span>'
+    : '<span class="chip blue" style="padding:1px 7px" title="Priced from the lowest live ask">lowest ask</span>';
 
-// ── Scrape trigger ────────────────────────────────────────────────────────────
+  const img = o.image_url
+    ? `<img class="card-img" src="${esc(o.image_url)}" alt="" loading="lazy" onerror="this.outerHTML=&quot;<div class='card-img placeholder'><i class='bi bi-image'></i></div>&quot;">`
+    : `<div class="card-img placeholder"><i class="bi bi-image"></i></div>`;
+
+  const lastSaleDate = o.last_sale_date
+    ? new Date(o.last_sale_date).toLocaleDateString() : null;
+
+  const profitVal = o.net_profit ?? o.margin ?? 0;
+
+  return `
+  <div class="card">
+    <div class="card-head">
+      ${img}
+      <div style="min-width:0">
+        <p class="card-title" title="${esc(o.shoe_name)}">${esc(o.shoe_name)}</p>
+        <div class="card-sub">
+          <code>${esc(o.sku)}</code>
+          <span>US ${esc(o.size)}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="chips">
+      ${liquidityChip(o)}
+      ${confidenceChip(o)}
+      ${stockChip(o)}
+    </div>
+
+    <div class="card-section">
+      <div class="section-label">
+        <span><i class="bi bi-shop"></i> ${esc(o.supplier_name)}</span>
+        ${o.supplier_url ? `<a href="${esc(o.supplier_url)}" target="_blank" rel="noopener">View product <i class="bi bi-box-arrow-up-right"></i></a>` : ''}
+      </div>
+      <div class="kv-grid">
+        <div class="kv"><span class="k">Retail price</span><span class="v ${o.discounted_price < o.original_price ? 'strike' : ''}">$${fmt(o.original_price)}</span></div>
+        <div class="kv"><span class="k">After discount</span><span class="v">$${fmt(o.discounted_price)}</span></div>
+        ${o.cashback_amount > 0 ? `<div class="kv"><span class="k">Cashback</span><span class="v muted">−$${fmt(o.cashback_amount)} (${(o.cashback_rate * 100).toFixed(1)}% ${esc(o.cashback_portal)})</span></div>` : ''}
+        <div class="kv"><span class="k">Your cost</span><span class="v">$${fmt(o.effective_price)}</span></div>
+        ${o.discount_applied && o.discount_applied !== 'No discount' ? `<div class="kv"><span class="k">Deal</span><span class="v muted">${esc(o.discount_applied)}</span></div>` : ''}
+      </div>
+    </div>
+
+    <div class="card-section">
+      <div class="section-label">
+        <span><i class="bi bi-bar-chart-line"></i> ${platform} ${fresh}</span>
+        ${o.market_url ? `<a href="${esc(o.market_url)}" target="_blank" rel="noopener">View listing <i class="bi bi-box-arrow-up-right"></i></a>` : ''}
+      </div>
+      <div class="kv-grid">
+        <div class="kv"><span class="k">Sell price</span><span class="v">$${fmt(o.listing_price)}</span></div>
+        <div class="kv"><span class="k">Highest bid</span><span class="v ${o.highest_bid == null ? 'muted' : ''}">${o.highest_bid != null ? '$' + fmt(o.highest_bid) : '—'}</span></div>
+        <div class="kv"><span class="k">Last sale</span><span class="v ${o.last_sale == null ? 'muted' : ''}">${o.last_sale != null ? '$' + fmt(o.last_sale) : '—'}</span></div>
+        <div class="kv"><span class="k">Sales 7d / 30d</span><span class="v ${o.sales_last_7_days == null ? 'muted' : ''}">${o.sales_last_7_days ?? '?'} / ${o.sales_last_30_days ?? '?'}</span></div>
+        ${lastSaleDate ? `<div class="kv"><span class="k">Last sold</span><span class="v muted">${lastSaleDate}</span></div>` : ''}
+        <div class="kv"><span class="k">Est. fees</span><span class="v muted">−$${fmt(o.seller_fees)}</span></div>
+        <div class="kv"><span class="k">Est. payout</span><span class="v">$${fmt(o.payout_price)}</span></div>
+        <div class="kv"><span class="k">Priced from</span><span class="v">${priceType}</span></div>
+      </div>
+    </div>
+
+    <div class="card-footer">
+      <div class="profit-block">
+        <div class="profit ${profitVal < 25 ? 'low' : ''}">+$${fmt(profitVal)}</div>
+        <div class="roi">${(o.roi ?? 0).toFixed(1)}% ROI on $${fmt(o.effective_price)}</div>
+      </div>
+      ${o.supplier_url ? `<a class="buy-link" href="${esc(o.supplier_url)}" target="_blank" rel="noopener"><i class="bi bi-bag"></i> Buy</a>` : ''}
+    </div>
+  </div>`;
+}
+
+// ── Scrape triggers + progress stream ────────────────────────────────────────
 async function _startScrapeEndpoint(endpoint, btn, readyLabel) {
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Starting…';
-
+  btn.innerHTML = '<i class="bi bi-hourglass-split"></i> Starting…';
   try {
     const r = await fetch(endpoint, { method: 'POST' });
     const d = await r.json();
-    if (d.status === 'already_running') {
-      showToast('A scrape is already running.', 'warning');
-    } else {
-      showProgressPanel();
-      streamProgress();
-    }
-  } catch (e) {
-    showToast('Failed to start scrape: ' + e, 'danger');
-  }
-
+    if (d.status === 'already_running') showToast('A scrape is already running.', 'warning');
+    else { showProgressPanel(); streamProgress(); }
+  } catch (e) { showToast('Failed to start scrape: ' + e, 'danger'); }
   btn.disabled = false;
   btn.innerHTML = readyLabel;
 }
-
 async function triggerScrape() {
-  await _startScrapeEndpoint(
-    '/api/jobs/scrape',
-    document.getElementById('btn-run'),
-    '<i class="bi bi-play-fill"></i> Run Full Scrape',
-  );
+  await _startScrapeEndpoint('/api/jobs/scrape', document.getElementById('btn-run'),
+    '<i class="bi bi-play-fill"></i> Run Full Scrape');
 }
-
 async function triggerQuickScan() {
-  await _startScrapeEndpoint(
-    '/api/jobs/scrape/quick',
-    document.getElementById('btn-quick'),
-    '<i class="bi bi-lightning-fill"></i> Quick Scan (Tier 0)',
-  );
+  await _startScrapeEndpoint('/api/jobs/scrape/quick', document.getElementById('btn-quick'),
+    '<i class="bi bi-lightning-charge"></i> Quick Scan');
 }
 
 function showProgressPanel() {
@@ -452,27 +577,22 @@ function showProgressPanel() {
 function streamProgress() {
   const panel = document.getElementById('progress-panel');
   const es = new EventSource('/api/jobs/progress');
-
   es.onmessage = (e) => {
     const line = document.createElement('div');
     const txt = e.data;
-    if (txt.startsWith('  ✓')) line.className = 'line-ok';
-    else if (txt.includes('ERROR') || txt.includes('error')) line.className = 'line-err';
+    if (txt.trimStart().startsWith('✓')) line.className = 'line-ok';
+    else if (txt.includes('ERROR') || txt.includes('error') || txt.trimStart().startsWith('✗')) line.className = 'line-err';
     else line.className = 'line-info';
     line.textContent = txt;
     panel.appendChild(line);
     panel.scrollTop = panel.scrollHeight;
   };
-
   es.addEventListener('done', () => {
     es.close();
-    loadStats();
-    loadOpportunities();
-    loadSupplierStatus();
+    loadStats(); loadOpportunities(); loadSupplierStatus();
     document.getElementById('running-indicator').style.display = 'none';
     showToast('Scrape complete!', 'success');
   });
-
   es.onerror = () => es.close();
 }
 
@@ -481,27 +601,23 @@ async function loadSupplierStatus() {
     const statusR = await fetch('/api/jobs/status');
     const status = await statusR.json();
     if (!status.current_job_id) return;
-
     const r = await fetch(`/api/jobs/${status.current_job_id}/suppliers`);
     const rows = await r.json();
     if (!rows.length) return;
 
-    const statusBadge = {
-      succeeded: '<span class="text-success">✓ succeeded</span>',
-      failed: '<span style="color:var(--danger)">✗ failed</span>',
-      skipped: '<span style="color:#8b8fa8">– skipped</span>',
+    const badge = {
+      succeeded: '<span style="color:var(--green);font-weight:600">✓ succeeded</span>',
+      failed:    '<span style="color:var(--red);font-weight:600">✗ failed</span>',
+      skipped:   '<span style="color:var(--text-3)">– skipped</span>',
     };
-
-    const body = document.getElementById('supplier-status-body');
-    body.innerHTML = rows.map(s => `
+    document.getElementById('supplier-status-body').innerHTML = rows.map(s => `
       <tr>
         <td>${esc(s.supplier_name)}</td>
-        <td>${statusBadge[s.status] || esc(s.status)}</td>
+        <td>${badge[s.status] || esc(s.status)}</td>
         <td>${s.items_found ?? '—'}</td>
         <td>${s.elapsed_seconds != null ? s.elapsed_seconds.toFixed(1) + 's' : '—'}</td>
-        <td><small style="color:#8b8fa8">${esc(s.error_message || '')}</small></td>
-      </tr>
-    `).join('');
+        <td style="color:var(--text-3)">${esc(s.error_message || '')}</td>
+      </tr>`).join('');
     document.getElementById('supplier-status-panel').style.display = 'block';
   } catch (e) { console.warn('Supplier status load failed', e); }
 }
@@ -510,25 +626,24 @@ async function pollJobStatus() {
   try {
     const r = await fetch('/api/jobs/status');
     const d = await r.json();
-    document.getElementById('running-indicator').style.display = d.is_running ? 'flex' : 'none';
-    document.getElementById('btn-run').disabled   = d.is_running;
+    document.getElementById('running-indicator').style.display = d.is_running ? 'inline' : 'none';
+    document.getElementById('btn-run').disabled = d.is_running;
     document.getElementById('btn-quick').disabled = d.is_running;
   } catch (_) {}
 }
 
-
-// ── Utilities ─────────────────────────────────────────────────────────────────
-function fmt(n)  { return parseFloat(n).toFixed(2); }
-function esc(s)  {
+// ── Utilities ────────────────────────────────────────────────────────────────
+function fmt(n)  { return n == null || isNaN(parseFloat(n)) ? '—' : parseFloat(n).toFixed(2); }
+function val(id, dflt) { const v = document.getElementById(id).value; return v === '' ? dflt : v; }
+function setText(id, t) { document.getElementById(id).textContent = t; }
+function esc(s) {
   return String(s ?? '')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
-
 function showToast(msg, type='info') {
   const t = document.createElement('div');
-  t.className = `alert alert-${type} position-fixed bottom-0 end-0 m-3`;
-  t.style.zIndex = 9999;
+  t.className = `toast ${type}`;
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.remove(), 4000);

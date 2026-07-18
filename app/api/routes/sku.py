@@ -8,6 +8,7 @@ no ROI/opportunity classification, rather than silently mixing in a
 possibly-stale DB-cached supplier price.
 """
 import concurrent.futures
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -20,9 +21,12 @@ from app.scrapers import stockx_api
 from app.scrapers.stockx_api import StockXAPIClient
 from app.scrapers.goat_market import GoatBrowserClient
 from app.scrapers.alias import AliasClient
+from app.services import liquidity as liquidity_svc
+from app.services.liquidity import LiquiditySnapshot
 from app.services.pricing import classify_opportunity
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Playwright's sync API refuses to run on a thread that has ever had an
 # asyncio event loop associated with it — which FastAPI's own request
@@ -50,9 +54,14 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
     if use_api:
         client = StockXAPIClient()
         try:
-            stockx_data = client.get_market(sku, name=name).product
+            lookup = client.get_market(sku, name=name)
+            stockx_data = lookup.product
+            if stockx_data is None and lookup.failure_reason:
+                logger.info(f"Live SKU lookup: StockX had no data for {sku} "
+                            f"({lookup.failure_reason})")
         except Exception:
-            pass
+            logger.exception(f"Live SKU lookup: StockX API failed for {sku} — "
+                             "falling through to GOAT/Alias")
         finally:
             client.close()
 
@@ -86,20 +95,24 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
             try:
                 stockx_data = StockXBrowserClient(stockx_session).get_product(sku, name=name)
             except Exception:
-                pass
+                logger.exception(f"Live SKU lookup: StockX browser scrape failed for {sku}")
         try:
             goat_data = GoatBrowserClient(goat_session).get_product(sku, name=name)
         except Exception:
-            pass
+            logger.exception(f"Live SKU lookup: GOAT browser scrape failed for {sku}")
 
-        sales_last_7_days: Optional[int] = None  # unknown unless Alias confirms a real count
+        # Sales liquidity: live Alias events (30-day window) when available —
+        # counts stay unknown (None) otherwise; see app/services/liquidity.py.
+        liq_snapshot = LiquiditySnapshot(source="none")
         alias_lowest_ask = None
         alias_last_sale = None
         if settings.alias_api_key:
             try:
                 alias = AliasClient(settings.alias_api_key)
                 try:
-                    sales_last_7_days = alias.get_sales_last_7_days(sku)
+                    events = alias.get_recent_sales(sku, days=30)
+                    if events is not None:
+                        liq_snapshot = liquidity_svc.summarize_sales_events(events)
                     avail = alias.get_availability(sku)
                     if avail:
                         alias_lowest_ask = alias.extract_lowest_ask(avail)
@@ -154,11 +167,16 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
                     listing_price=entry["lowest_ask"],
                     platform=entry["platform"],
                     resale_price_type="lowest_ask",
-                    sales_last_7_days=sales_last_7_days,
+                    liquidity_snapshot=liq_snapshot,
+                    highest_bid=entry["highest_bid"],
                 )
             sizes_out.append({
                 **entry,
-                "sales_last_7_days": sales_last_7_days,
+                "sales_last_7_days": liq_snapshot.sales_last_7_days,
+                "sales_last_30_days": liq_snapshot.sales_last_30_days,
+                "last_sale_date": (liq_snapshot.last_sale_date.isoformat()
+                                   if liq_snapshot.last_sale_date else None),
+                "liquidity_status": result.liquidity.status if result else None,
                 "payout_after_fees": round(result.payout, 2) if result else None,
                 "margin": round(result.margin, 2) if result else None,
                 "roi": round(result.roi, 2) if result else None,

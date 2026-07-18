@@ -10,6 +10,7 @@ from typing import Optional, List
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 
+from app import runtime
 from app.config import settings
 from app.database import SessionLocal, ScrapeJob
 
@@ -21,6 +22,7 @@ _lock = threading.Lock()
 _progress_log: List[str] = []   # ring buffer of last 200 messages
 _current_job_id: Optional[int] = None
 _is_running = False
+_scrape_thread: Optional[threading.Thread] = None   # thread of the active run, joined on shutdown
 
 _scheduler: Optional[BackgroundScheduler] = None
 
@@ -68,13 +70,18 @@ def _finalize_job(job_id: int, error: Optional[str]):
 
 
 def _run_scrape_job(categories=None, min_discount=0):
-    global _is_running, _current_job_id
+    global _is_running, _current_job_id, _scrape_thread
+
+    if runtime.shutdown_event.is_set():
+        logger.info("Shutdown in progress — not starting a new scrape job")
+        return
 
     with _lock:
         if _is_running:
             logger.info("Scrape already running — skipping this tick")
             return
         _is_running = True
+        _scrape_thread = threading.current_thread()
         _progress_log.clear()
 
     db = SessionLocal()
@@ -170,7 +177,28 @@ def start_scheduler():
 
 
 def stop_scheduler():
+    """Graceful shutdown: stop scheduling new runs, signal the active run to
+    stop at its next safe boundary (supplier / lookup-chunk edge — everything
+    committed so far stays committed), and wait briefly for it to drain.
+
+    Without the signal+join, the scrape's non-daemon ThreadPoolExecutor
+    workers are joined at interpreter exit with a full queue, which is the
+    multi-minute hang (and KeyboardInterrupt-in-thread-join traceback) seen
+    on Ctrl-C."""
     global _scheduler
     if _scheduler and _scheduler.running:
         _scheduler.shutdown(wait=False)
         logger.info("Scheduler stopped")
+
+    runtime.shutdown_event.set()
+    thread = _scrape_thread
+    if thread is not None and thread.is_alive():
+        logger.info("Waiting up to 30s for the active scrape job to stop …")
+        thread.join(timeout=30)
+        if thread.is_alive():
+            logger.warning(
+                "Scrape job still draining after 30s — its in-flight HTTP calls "
+                "are bounded by client timeouts; exit may take a little longer."
+            )
+        else:
+            logger.info("Active scrape job stopped cleanly")

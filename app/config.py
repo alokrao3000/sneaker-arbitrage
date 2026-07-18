@@ -14,6 +14,22 @@ class Settings(BaseSettings):
     # (resale − StockX seller fees − effective price) to be flagged.
     min_margin_threshold: float = 10.0
 
+    # ── Sales-liquidity gate (app/services/liquidity.py) ──
+    # A margin-positive product only surfaces when it is actually selling:
+    # >= liquidity_min_sales_7d sales in the last 7 days OR
+    # >= liquidity_min_sales_30d sales in the last 30 days. Products with
+    # KNOWN counts below both are excluded (not shown, not persisted).
+    liquidity_min_sales_7d: int = 1
+    liquidity_min_sales_30d: int = 5
+    # The official StockX API exposes no sales history, so counts come from
+    # Alias / persisted sale_records and may be UNKNOWN. When True (default),
+    # an unknown-liquidity size still passes if it has a live highest bid
+    # (a real committed buyer — the best demand signal in the market data we
+    # do have); it is persisted with liquidity_status='unknown' and ranks
+    # below confirmed-liquid rows. Set False for strict per-spec exclusion
+    # of anything without confirmed sales.
+    liquidity_allow_unknown_with_bid: bool = True
+
     # ── StockX official API (developer.stockx.com) ──
     # client_id / client_secret / api_key come from your StockX developer app.
     # refresh_token is captured once via scripts/stockx_auth.py; rotations are
@@ -32,6 +48,19 @@ class Settings(BaseSettings):
     # (~1 req/s), NOT the retailer-scrape concurrency above.
     stockx_lookup_concurrency: int = 2
 
+    # ── Cart validation ──
+    # When enabled, every opportunity candidate's exact size is verified with a
+    # real add-to-cart on retailers whose scraper supports it (Shopify). A
+    # definitive rejection kills the opportunity; a rate-limit/network blip is
+    # inconclusive and only lowers the confidence level.
+    cart_validation_enabled: bool = True
+    # When True (default), retailers that support cart validation only surface
+    # opportunities whose size actually passed it (VERIFIED_CART). Retailers
+    # without a cart API (Footlocker) cap at VERIFIED_INVENTORY and are still
+    # surfaced — their per-size inventory endpoint is the strongest signal
+    # that exists for them.
+    require_cart_verification: bool = True
+
     scrape_delay_min: float = 1.5
     scrape_delay_max: float = 4.0
     scrape_interval_minutes: int = 60
@@ -39,6 +68,25 @@ class Settings(BaseSettings):
 
     kicks_dev_api_key: str = ""
     alias_api_key: str = ""
+
+    # ── eBay Buy APIs (developer.ebay.com) ──
+    # DEMAND PROXIES ONLY. eBay confirmed (July 2026) that no public API
+    # exposes market-wide sold-item history — Marketplace Insights, even if
+    # granted, only covers our own sales. The client therefore surfaces
+    # ACTIVE-listing ask stats (Browse) and watch/merchandising demand signals
+    # (Marketing), which are context/ranking inputs and are NEVER fed into the
+    # sales-liquidity gate. See app/scrapers/ebay.py.
+    ebay_app_id: str = ""            # eBay "App ID" (Client ID)
+    ebay_cert_id: str = ""           # eBay "Cert ID" (Client Secret)
+    ebay_marketplace_id: str = "EBAY_US"
+    ebay_oauth_scope: str = "https://api.ebay.com/oauth/api_scope"
+    # Category powering the merchandised-product demand rank (Men's Athletic
+    # Shoes on EBAY_US).
+    ebay_sneaker_category_id: str = "15709"
+    # Per-SKU TTL for eBay context lookups (sku_cache.gate_ebay_check) —
+    # ask-stats/demand signals are secondary, so they refresh slower than
+    # StockX market data.
+    ebay_market_ttl_hours: float = 12.0
 
     browser_headless: bool = True
     browser_state_dir: str = "data/browser_state"

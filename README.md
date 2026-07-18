@@ -67,13 +67,25 @@ per-account and change. The throttle is app-wide: a token-bucket for pacing
 plus a persistent per-day counter (`stockx_api_usage` table) shared by scrape
 runs and live SKU lookups.
 
-**⚠ Response-shape assumptions:** the client was written without having seen
-a live response from this account. Field names (`styleId`, `variantId`,
-`lowestAskAmount`, …) follow the public docs; parsers are defensive and log
-`[stockx-api shape]` warnings when reality differs. On the first real run,
-grep the logs for that tag and fix `stockx_api.py` + this section before
-trusting the data model. Whether the market-data endpoint returns last-sale
-at all is UNCONFIRMED — it's parsed opportunistically.
+**Response shapes (verified against live responses on 2026-07-17):**
+- `catalog/search` returns `{"count", "hasNextPage", "products": [...]}`;
+  each product has `productId`, `urlKey`, `styleId`, `title`,
+  `productAttributes.{colorway,gender,releaseDate,retailPrice}`.
+  **`styleId` can be compound** (`"315122-111/CW2288-111"`) — matching splits
+  on `/` and compares each segment.
+- `variants` returns `variantId`, `variantValue` (size), and
+  `sizeChart.defaultConversion.{size,type}` (`"us m"` / `"us w"` — women's
+  sizes are normalized to the `W{n}` convention used on the retail side).
+- `market-data` returns per-variant `lowestAskAmount` / `highestBidAmount`
+  as **strings**, plus `standardMarketData`/`flexMarketData`/
+  `directMarketData` sub-objects. **There is no last-sale field** in the
+  public API — `last_sale` stays NULL for StockX rows.
+
+Requests retry on 408/429/500/502/503/504 (exponential backoff + jitter,
+`Retry-After` honored, 4xx client errors never retried); each physical
+request counts against the daily budget. Failed lookups are collected and
+summarized at the end of a run — they never abort it — and their gate state
+stays untouched so they're retried next run.
 
 ## Resale price: ask vs last-sale
 
@@ -88,6 +100,38 @@ transact next — and fall back to last-sale only when no ask exists. The
 tradeoff: asks can be fantasy on illiquid shoes (nobody may pay it), so a
 margin computed off a lonely high ask overstates reality; when the ASK badge
 sits far above last-sale, trust the sale.
+
+## Sales liquidity
+
+A high theoretical ROI is worthless if the shoe isn't actually selling, so a
+margin-positive size only becomes an opportunity when it also passes the
+sales-liquidity gate (`app/services/liquidity.py`):
+
+- **≥ 1 completed sale in the last 7 days**, OR
+- **≥ 5 completed sales in the last 30 days**
+  (`LIQUIDITY_MIN_SALES_7D` / `LIQUIDITY_MIN_SALES_30D`).
+
+Products whose *known* counts fail both conditions are excluded outright: not
+returned by the API, not shown in the UI, not persisted as opportunities.
+Per-SKU metrics (`sales_last_7_days`, `sales_last_30_days`, `last_sale_date`,
+`liquidity_status`) are persisted on each opportunity for filtering,
+analytics, and debugging, and the default "best" sort weights profitability
+by 30-day volume so liquid flips outrank illiquid ones.
+
+**Data sources & documented limitation.** The official StockX public API
+exposes **no sales history at all** — the market-data endpoint has no
+last-sale field and no sales-count/sales-list endpoint exists (live-verified
+2026-07-17, see `app/scrapers/stockx_api.py`); GOAT's public site exposes
+none either. Sale events therefore come from the Alias partner API (30-day
+window, persisted to `sale_records`), with previously persisted records as a
+fallback while collection is demonstrably current (newest record recorded
+within 30 days). When no sales source exists (e.g. no valid `ALIAS_API_KEY`),
+counts are *unknown* — the best remaining demand signal in the market data we
+do have is a **live highest bid** for the exact size (a committed buyer), so
+with `LIQUIDITY_ALLOW_UNKNOWN_WITH_BID=true` (default) an unknown-liquidity
+size surfaces only if it has one, tagged `liquidity_status=unknown` so it
+ranks below and is filterable from confirmed-liquid rows. Set it to `false`
+to strictly exclude anything without confirmed sales.
 
 ## Rate-limit-aware caching
 
@@ -106,6 +150,41 @@ gate (`sku_market_cache` table, rules in `app/services/sku_cache.py`):
 
 Calls made vs skipped are logged per run, stored on the job row, and shown in
 the dashboard.
+
+## Cart validation & inventory confidence
+
+Price + inventory endpoints alone can lie (pre-drops, notify-me pages, stale
+caches). Availability is graded on a confidence ladder
+(`app/scrapers/base.py`):
+
+| Level | Meaning |
+|---|---|
+| `VERIFIED_CART` | this exact size passed a real add-to-cart via the retailer's normal purchase flow |
+| `VERIFIED_INVENTORY` | the retailer's inventory endpoint explicitly confirmed stock |
+| `INVENTORY_ONLY` | listed, but the stronger signal was inconclusive (e.g. cart probe rate-limited) |
+| `UNKNOWN` | no availability signal |
+| `OUT_OF_STOCK` | definitive negative |
+
+Every **opportunity candidate** gets a per-size cart validation on retailers
+whose scraper supports it (Shopify: `POST /cart/add.json`, capturing the cart
+token + confirmed quantity). A definitive rejection (sold out / size
+unavailable / dead variant) excludes the opportunity — recorded, never silent
+— while a 429/network blip is *inconclusive* and only lowers confidence
+(`CART_VALIDATION_ENABLED` / `REQUIRE_CART_VERIFICATION` in `.env`).
+Footlocker's cart sits behind Akamai and its sizes carry no cart-addable
+variant id, so it caps at `VERIFIED_INVENTORY` (its per-size
+`stockLevelStatus` is the strongest signal that exists there). Validation
+volume is deliberately tiny: only candidates are checked, not all products.
+
+Diagnostics: `retailer_product_diagnostics` keeps the latest per-(retailer,
+SKU) pipeline outcome — furthest stage reached, sizes detected, inventory/cart
+verdicts, cart token/quantity, last error, evaluation duration — so failed
+retailers are debuggable from SQL without rerunning a scrape. Each run ends
+with a per-retailer summary table (discovered / parsed / inventory-ok /
+cart-verified / opportunities / SQL writes / failures / retries / timing),
+also persisted on `scrape_supplier_results`.
+`python scripts/validate_pipeline.py` runs the full pipeline on two fast
+suppliers and prints a stage-by-stage validation report.
 
 ## Concurrency
 

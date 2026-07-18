@@ -72,6 +72,28 @@ def record_seen(db: Session, sku: str, now: Optional[datetime] = None):
     row.last_seen_at = now
 
 
+def gate_ebay_check(db: Session, sku: str, now: Optional[datetime] = None) -> bool:
+    """Per-SKU gate for eBay context lookups (Browse ask-stats + Marketing
+    demand signal). Simpler than the StockX gate because eBay data is
+    secondary context, never a profitability verdict: check when never
+    checked or the TTL (settings.ebay_market_ttl_hours) expired, skip
+    otherwise."""
+    now = now or datetime.utcnow()
+    row = db.get(SkuMarketCache, sku)
+    if row is None or row.ebay_last_checked_at is None:
+        return True
+    return now - row.ebay_last_checked_at > timedelta(hours=settings.ebay_market_ttl_hours)
+
+
+def record_ebay_check(db: Session, sku: str, now: Optional[datetime] = None):
+    now = now or datetime.utcnow()
+    row = db.get(SkuMarketCache, sku)
+    if row is None:
+        row = SkuMarketCache(sku=sku)
+        db.add(row)
+    row.ebay_last_checked_at = now
+
+
 def record_check(db: Session, sku: str, effective_price: float, verdict: str,
                  resale_price: Optional[float] = None,
                  resale_price_type: Optional[str] = None,

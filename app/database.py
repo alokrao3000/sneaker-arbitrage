@@ -58,6 +58,7 @@ class SupplierProduct(Base):
     name = Column(String(500))
     original_price = Column(Numeric(10, 2))
     product_url = Column(String(1000))
+    image_url = Column(String(1000))
     scraped_at = Column(DateTime, default=datetime.utcnow)
     first_seen_at = Column(DateTime, default=datetime.utcnow, index=True)  # immutable; set once
     published_at = Column(DateTime)   # publication date reported by the source site
@@ -137,6 +138,9 @@ class Opportunity(Base):
 
     listing_platform = Column(String(50))       # stockx | goat
     listing_price = Column(Numeric(10, 2))      # resale price on the platform (see resale_price_type)
+    highest_bid = Column(Numeric(10, 2))        # platform highest bid for this size (instant-sale floor)
+    last_sale = Column(Numeric(10, 2))          # platform last sale for this size (None on StockX API — not exposed)
+    seller_fees = Column(Numeric(10, 2))        # estimated platform fees incl. shipping (listing_price - payout_price)
     resale_price_type = Column(String(20), default="lowest_ask")  # lowest_ask | last_sale — an ask is a
                                                 # listing price, a last-sale is a cleared transaction; README §Resale price
     payout_price = Column(Numeric(10, 2))       # listing_price - estimated seller fees
@@ -153,9 +157,54 @@ class Opportunity(Base):
     cashback_amount = Column(Numeric(10, 2), default=0)
     effective_price = Column(Numeric(10, 2))             # discounted_price * (1 - cashback_rate); the true ROI cost basis
 
-    sales_last_7_days = Column(Integer, default=0)
+    # No default — NULL means "no sales source available" (unknown), which the
+    # API and filters treat differently from a confirmed 0. A scalar default
+    # here would silently turn explicit None inserts into 0.
+    sales_last_7_days = Column(Integer)
+    sales_last_30_days = Column(Integer)        # same NULL-means-unknown convention
+    last_sale_date = Column(DateTime)           # most recent completed sale we know of
+    # eligible | unknown (see app/services/liquidity.py). not_eligible rows are
+    # never persisted — the gate excludes them before this table. NULL = row
+    # predates the liquidity gate; treated as unknown by the API.
+    liquidity_status = Column(String(20))
     supplier_url = Column(String(1000))
+    image_url = Column(String(1000))            # retailer product image
     market_url = Column(String(1000))
+
+    # ── eBay context (app/scrapers/ebay.py) — DEMAND PROXIES, never sold data.
+    # ebay_price is a current ACTIVE ASK (median of live listings), not a
+    # realized sale price — ebay_price_type says so explicitly so downstream
+    # consumers can't mistake it for a sold average. Watch count / demand rank
+    # are soft signals for display/sort only; they are structurally excluded
+    # from the sales-liquidity gate (sales_last_*_days stay StockX/Alias-fed).
+    # All NULL when eBay credentials are absent or every endpoint was out of
+    # scope for this SKU.
+    ebay_price = Column(Numeric(10, 2))             # median active ask
+    ebay_price_type = Column(String(20))            # always 'active_ask' for now; 'sold_avg'
+                                                    # reserved for Marketplace Insights if approved
+    ebay_min_ask = Column(Numeric(10, 2))
+    ebay_max_ask = Column(Numeric(10, 2))
+    ebay_active_listings = Column(Integer)          # live listing count (supply context)
+    ebay_watch_count = Column(Integer)              # soft demand signal — NOT sales evidence
+    ebay_demand_rank = Column(Integer)              # merchandised-products rank — NOT sales evidence
+    ebay_seller_fees = Column(Numeric(10, 2))       # est. fees on the reference ask (app/ebay_fees.py)
+    ebay_payout = Column(Numeric(10, 2))
+    ebay_margin = Column(Numeric(10, 2))            # reference margin vs the ACTIVE ask
+    ebay_roi = Column(Numeric(8, 4))
+    ebay_fetched_at = Column(DateTime)
+
+    # Where to sell (app/services/pricing.py:recommend_platform). Defaults to
+    # the platform whose market data backs the margin (StockX) whenever its
+    # sales data is genuinely known; eBay-based reasoning only breaks the tie
+    # when StockX sales are unknown, and is then flagged confidence='low'.
+    recommended_platform = Column(String(20))
+    recommendation_confidence = Column(String(10))  # high | low
+
+    # Inventory confidence ladder (see app/scrapers/base.py):
+    # VERIFIED_CART | VERIFIED_INVENTORY | INVENTORY_ONLY | UNKNOWN | OUT_OF_STOCK
+    inventory_confidence = Column(String(20))
+    cart_status = Column(String(40))            # CART_* reason from the last validation attempt
+    cart_checked_at = Column(DateTime)
 
     is_active = Column(Boolean, default=True)
     found_at = Column(DateTime, default=datetime.utcnow)
@@ -199,6 +248,45 @@ class ScrapeSupplierResult(Base):
     error_message = Column(Text)
     elapsed_seconds = Column(Numeric(8, 2))
     finished_at = Column(DateTime, default=datetime.utcnow)
+    # Per-stage observability (see the end-of-run summary table)
+    products_discovered = Column(Integer)   # raw items from the retailer
+    products_parsed = Column(Integer)       # complete products with SKU
+    inventory_ok = Column(Integer)          # products with >=1 in-stock size
+    cart_attempts = Column(Integer)         # per-size cart validations attempted
+    cart_verified = Column(Integer)         # ... that came back VERIFIED_CART
+    opportunities_found = Column(Integer)
+    failure_count = Column(Integer)         # per-product evaluation/persist failures
+    http_retries = Column(Integer)          # transient-failure retries during scrape
+
+
+class RetailerProductDiagnostic(Base):
+    """Latest per-(retailer, SKU) pipeline diagnostics — which stage the
+    product reached, availability/cart verdicts, and the last error. Upserted
+    every scrape so failed retailers can be debugged from SQL without
+    rerunning anything. `stage` is the furthest stage reached:
+    parsed → inventory → cart_validated → opportunity → persisted."""
+    __tablename__ = "retailer_product_diagnostics"
+
+    id = Column(Integer, primary_key=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
+    supplier_name = Column(String(255))
+    sku = Column(String(100), nullable=False, index=True)
+    product_url = Column(String(1000))
+    image_url = Column(String(1000))
+    sizes_detected = Column(Text)           # e.g. "9✓ 9.5✓ 10✗" (✓ = in stock)
+    inventory_status = Column(String(20))   # confidence ladder value
+    cart_status = Column(String(40))        # CART_* reason (last validation on any size)
+    cart_token = Column(String(255))        # retailer cart identifier when returned
+    cart_quantity = Column(Integer)         # quantity the retailer confirmed
+    cart_message = Column(Text)             # raw retailer response detail
+    stage = Column(String(30), nullable=False)
+    last_error = Column(Text)
+    scrape_duration_ms = Column(Integer)    # per-product evaluation duration
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("supplier_id", "sku", name="uq_diag_supplier_sku"),
+    )
 
 
 class SkuMarketCache(Base):
@@ -217,6 +305,9 @@ class SkuMarketCache(Base):
     last_seen_at = Column(DateTime)                 # last time any scrape saw this SKU
     resale_price = Column(Numeric(10, 2))           # resale price used in the last evaluation
     resale_price_type = Column(String(20))          # lowest_ask | last_sale
+    # eBay context is gated separately (its endpoints have their own quota and
+    # its data is secondary) — see sku_cache.gate_ebay_check.
+    ebay_last_checked_at = Column(DateTime)
 
 
 class StockXMatchFailure(Base):

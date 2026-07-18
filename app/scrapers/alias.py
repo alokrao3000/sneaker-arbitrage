@@ -70,9 +70,10 @@ class AliasClient:
         catalog_id: str,
         size: Optional[str] = None,
         region_id: Optional[str] = None,
+        days: int = 7,
     ) -> Optional[List[Dict[str, Any]]]:
         """
-        Fetch individual marketplace sale events in the last 7 days for a
+        Fetch individual marketplace sale events in the last `days` days for a
         catalog item, as a list of {"price": float|None, "sale_date": datetime}.
 
         Uses Pattern 1 (catalog-level) from the recent_sales endpoint so that a
@@ -101,7 +102,7 @@ class AliasClient:
         if not isinstance(sales, list):
             return None
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         events: List[Dict[str, Any]] = []
         for sale in sales:
             sale_date = _parse_sale_date(sale)
@@ -114,7 +115,7 @@ class AliasClient:
                 events.append({"price": _parse_sale_price(sale), "sale_date": sale_date,
                                "size": _parse_sale_size(sale)})
             else:
-                # Results are newest-first; once we pass the 7-day cutoff we're done
+                # Results are newest-first; once we pass the cutoff we're done
                 break
 
         return events
@@ -156,16 +157,22 @@ class AliasClient:
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
+    _auth_failed = False   # class-wide latch: one bad key poisons every instance equally
+
     def _get_json(self, url: str, params: dict = None) -> Optional[Dict]:
+        if AliasClient._auth_failed:
+            return None   # key already proven invalid — don't hammer the API per size
         for attempt in range(3):
             try:
                 resp = self._session.get(url, params=params)
                 if resp.status_code == 200:
                     return resp.json()
                 if resp.status_code in (401, 403):
+                    AliasClient._auth_failed = True
                     logger.error(
                         f"Alias API: authentication failed ({resp.status_code}) — "
-                        "check ALIAS_API_KEY in .env"
+                        "check ALIAS_API_KEY in .env. Alias lookups are DISABLED "
+                        "for the rest of this process."
                     )
                     return None
                 if resp.status_code == 404:
