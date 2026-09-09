@@ -124,31 +124,36 @@ def classify_opportunity(
 
 
 # ── eBay reference margin + platform recommendation ──────────────────────────
-# eBay has no public sold-data source (see app/scrapers/ebay.py's module
-# docstring), so its numbers here are a REFERENCE computed against a current
-# ACTIVE ask. They exist for context and tie-breaking only; classify_opportunity
-# above deliberately has no eBay inputs, so nothing eBay-derived can reach the
-# sales-liquidity gate.
+# Under the default configuration eBay has no sold-data source (see
+# app/scrapers/ebay.py's module docstring), so these numbers are a REFERENCE
+# computed against a current ACTIVE ask — price_type='active_ask'. If the
+# Tier-1 sold feed is ever enabled, the same math runs against the
+# outlier-filtered 30-day sold average and is labeled 'sold_avg'.
+# classify_opportunity above deliberately has no eBay inputs; only genuine
+# sold-tier counts may reach the sales gate (arbitrage.py enforces the
+# price_type=='sold_avg' check before building a snapshot from them).
 
 @dataclass
 class EbayReference:
-    ask: float                        # median current ACTIVE ask — not a realized price
-    price_type: str                   # always "active_ask" until Marketplace Insights lands
+    price: float                      # median active ask, or Tier-1 30d sold avg
+    price_type: str                   # "active_ask" | "sold_avg" — see above
     fees: float
     payout: float
     margin: float
     roi: float
 
 
-def compute_ebay_reference(cost: float, active_ask: float) -> EbayReference:
-    """Reference economics if this pair were sold on eBay AT THE CURRENT
-    MEDIAN ASK. Labeled active_ask because that price is a live listing you'd
-    have to match, not evidence anything cleared at it."""
-    fees = estimate_ebay_seller_fees(active_ask)
-    payout = active_ask - fees
+def compute_ebay_reference(cost: float, price: float,
+                           price_type: str = "active_ask") -> EbayReference:
+    """Reference economics if this pair were sold on eBay at `price`. The
+    label travels with the number: an active_ask is a live listing you'd have
+    to match (not evidence anything cleared at it), a sold_avg is an average
+    of realized transactions."""
+    fees = estimate_ebay_seller_fees(price)
+    payout = price - fees
     margin = payout - cost
     roi = margin / cost * 100.0 if cost > 0 else 0.0
-    return EbayReference(ask=active_ask, price_type="active_ask", fees=fees,
+    return EbayReference(price=price, price_type=price_type, fees=fees,
                          payout=payout, margin=margin, roi=roi)
 
 

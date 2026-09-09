@@ -1,12 +1,17 @@
 """EbayClient behavior: OAuth client-credentials flow, active-ask stats,
-demand signal, and — most importantly — that a 403/out-of-scope endpoint is
-logged once, disabled, and returns None instead of crashing the batch."""
+demand signal, the tiered sold→listing fallback, and — most importantly —
+that a 403/out-of-scope endpoint is logged once, disabled, and returns None
+instead of crashing the batch."""
 import json
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
 
-from app.scrapers.ebay import EbayClient, BROWSE_SAMPLE_SIZE
+from app.config import settings
+from app.scrapers.ebay import (
+    EbayClient, BROWSE_SAMPLE_SIZE, filter_price_outliers,
+)
 
 
 TOKEN_PATH = "/identity/v1/oauth2/token"
@@ -162,11 +167,130 @@ class TestDemandSignal:
         assert sig.demand_rank == 1
 
 
-class TestMarketplaceInsightsStub:
-    def test_sold_items_search_is_a_guarded_stub(self):
+class TestSoldStatsTier:
+    """Tier 1 (get_sold_stats): hard-gated off by default, outlier-filtered
+    when enabled, and never crashes the batch."""
+
+    def test_disabled_by_default_returns_none_and_logs_once(self, caplog):
+        calls = {"insights": 0}
+
         def handler(request):
-            return token_response()
+            if request.url.path == TOKEN_PATH:
+                return token_response()
+            calls["insights"] += 1
+            return httpx.Response(200, json={"itemSales": []})
 
         c = make_client(handler)
-        with pytest.raises(NotImplementedError):
-            c.sold_items_search("DZ5485-612")
+        with caplog.at_level("WARNING"):
+            assert c.get_sold_stats("DZ5485-612") is None
+            assert c.get_sold_stats("DZ5485-612") is None
+        assert calls["insights"] == 0      # never even hits the network
+        warnings = [r for r in caplog.records if "disabled for this process" in r.message]
+        assert len(warnings) == 1
+
+    def test_enabled_returns_outlier_filtered_avg_and_counts(self, monkeypatch):
+        monkeypatch.setattr(settings, "ebay_sold_data_enabled", True)
+        now = datetime.utcnow()
+        recent = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        old = (now - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        def handler(request):
+            if request.url.path == TOKEN_PATH:
+                return token_response()
+            assert "marketplace_insights" in request.url.path
+            return httpx.Response(200, json={"itemSales": [
+                {"lastSoldPrice": {"value": "200.00"}, "lastSoldDate": recent},
+                {"lastSoldPrice": {"value": "210.00"}, "lastSoldDate": recent},
+                {"lastSoldPrice": {"value": "190.00"}, "lastSoldDate": old},
+                # fake/junk listing at 5× the median — must not skew the avg,
+                # but it IS still a sale and must still count
+                {"lastSoldPrice": {"value": "1000.00"}, "lastSoldDate": old},
+            ]})
+
+        stats = make_client(handler).get_sold_stats("DZ5485-612")
+        assert stats.price_type == "sold_avg"
+        assert stats.sales_count_7d == 2
+        assert stats.sales_count_30d == 4          # outlier still counts as a sale
+        assert stats.sample_size == 3              # ...but not toward the average
+        assert stats.avg_sold_price_30d == pytest.approx(200.0)
+
+    def test_enabled_but_403_fails_soft(self, monkeypatch):
+        monkeypatch.setattr(settings, "ebay_sold_data_enabled", True)
+
+        def handler(request):
+            if request.url.path == TOKEN_PATH:
+                return token_response()
+            if "marketplace_insights" in request.url.path:
+                return httpx.Response(403, json={"errors": []})
+            return httpx.Response(200, json={"itemSummaries": [], "total": 0})
+
+        c = make_client(handler)
+        assert c.get_sold_stats("DZ5485-612") is None
+        # Browse tier is unaffected by the insights 403
+        assert c.get_active_listing_stats("DZ5485-612") is not None
+
+
+class TestTierFallbackInPipeline:
+    """_fetch_ebay_context (arbitrage.py) runs the tiers in order: sold stats
+    first, active-listing stats as the fallback — and labels the result so
+    downstream code can tell which tier answered."""
+
+    def _handler(self, sold_response=None):
+        def handler(request):
+            if request.url.path == TOKEN_PATH:
+                return token_response()
+            if "marketplace_insights" in request.url.path:
+                return sold_response or httpx.Response(403, json={"errors": []})
+            if "catalog" in request.url.path:
+                return httpx.Response(200, json={"productSummaries": []})
+            if "merchandised_product" in request.url.path:
+                return httpx.Response(200, json={"merchandisedProducts": []})
+            return httpx.Response(200, json={
+                "total": 40,
+                "itemSummaries": [
+                    {"itemId": "v1|1|0", "price": {"value": "170.00"}},
+                    {"itemId": "v1|2|0", "price": {"value": "190.00"}},
+                ],
+            })
+        return handler
+
+    def _product(self):
+        from app.scrapers.base import ScrapedProduct
+        return ScrapedProduct(name="AJ4", sku="HF9989-100", url="u",
+                              original_price=215.0, sizes=[])
+
+    def test_unauthorized_tier1_falls_back_to_listing_avg(self):
+        from app.services.arbitrage import _fetch_ebay_context
+        ctx = _fetch_ebay_context(make_client(self._handler()),
+                                  self._product(), emit=lambda m: None)
+        assert ctx.price_type == "active_ask"
+        assert ctx.price == 180.0                 # median of the live asks
+        assert ctx.active_listings == 40          # listing count persists regardless of tier
+        assert ctx.sales_count_7d is None         # never fabricated from listings
+        assert ctx.sales_count_30d is None
+
+    def test_tier1_wins_when_it_returns_data(self, monkeypatch):
+        monkeypatch.setattr(settings, "ebay_sold_data_enabled", True)
+        from app.services.arbitrage import _fetch_ebay_context
+        now = datetime.utcnow()
+        recent = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        sold = httpx.Response(200, json={"itemSales": [
+            {"lastSoldPrice": {"value": "200.00"}, "lastSoldDate": recent},
+        ]})
+        ctx = _fetch_ebay_context(make_client(self._handler(sold_response=sold)),
+                                  self._product(), emit=lambda m: None)
+        assert ctx.price_type == "sold_avg"
+        assert ctx.price == 200.0
+        assert (ctx.sales_count_7d, ctx.sales_count_30d) == (1, 1)
+        assert ctx.active_listings == 40          # tier 2 still fetched for supply context
+
+
+class TestOutlierFilter:
+    def test_drops_beyond_median_band_and_two_sigma(self):
+        prices = [100.0, 105.0, 110.0, 95.0, 1000.0, 10.0]
+        kept = filter_price_outliers(prices)
+        assert 1000.0 not in kept and 10.0 not in kept
+        assert set(kept) == {100.0, 105.0, 110.0, 95.0}
+
+    def test_small_samples_pass_through(self):
+        assert filter_price_outliers([100.0, 900.0]) == [100.0, 900.0]

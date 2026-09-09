@@ -77,6 +77,14 @@ class SupplierProductSize(Base):
     supplier_product_id = Column(Integer, ForeignKey("supplier_products.id"), nullable=False)
     size = Column(String(20), nullable=False)
     in_stock = Column(Boolean, default=True)
+    # Cart-verification stamp from the scrape-phase probe / opportunity-time
+    # validate_cart. NULL is_cartable = never verified (unknown), never "no".
+    # verified_cartable_at is the last SUCCESSFUL verification — the cached
+    # evaluation path in arbitrage.py refuses to trust cached-profitable
+    # verdicts once this is older than settings.cart_verification_ttl_hours
+    # (carry-forward: an inconclusive probe keeps the previous stamp).
+    is_cartable = Column(Boolean)
+    verified_cartable_at = Column(DateTime)
 
     product = relationship("SupplierProduct", back_populates="sizes")
 
@@ -179,9 +187,14 @@ class Opportunity(Base):
     # from the sales-liquidity gate (sales_last_*_days stay StockX/Alias-fed).
     # All NULL when eBay credentials are absent or every endpoint was out of
     # scope for this SKU.
-    ebay_price = Column(Numeric(10, 2))             # median active ask
-    ebay_price_type = Column(String(20))            # always 'active_ask' for now; 'sold_avg'
-                                                    # reserved for Marketplace Insights if approved
+    ebay_price = Column(Numeric(10, 2))             # median active ask, or Tier-1 30d sold avg
+    ebay_price_type = Column(String(20))            # 'active_ask' | 'sold_avg' — sold_avg only
+                                                    # from Marketplace Insights (gated, off by default)
+    # Tier-1 realized-sale counts (Marketplace Insights only). NULL = unknown,
+    # never zero — the active-listing tier can't populate these, so a non-NULL
+    # value here is always genuine sales evidence.
+    ebay_sales_count_7d = Column(Integer)
+    ebay_sales_count_30d = Column(Integer)
     ebay_min_ask = Column(Numeric(10, 2))
     ebay_max_ask = Column(Numeric(10, 2))
     ebay_active_listings = Column(Integer)          # live listing count (supply context)

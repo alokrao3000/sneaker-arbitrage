@@ -4,7 +4,8 @@ eBay Buy-API client — DEMAND PROXIES ONLY, by design.
 eBay developer support confirmed (July 2026) that NO public API exposes
 market-wide historical sold-item data: Marketplace Insights, even if the
 pending application is approved, only covers sales the account itself made.
-So this client deliberately does NOT produce sold prices or sales counts.
+So under the default configuration this client does NOT produce sold prices
+or sales counts (get_sold_stats() is hard-gated off — see below).
 What it does produce:
 
   - get_active_listing_stats(): number of live listings + min/median/max
@@ -29,16 +30,19 @@ response disables that endpoint for the process with ONE warning log, and
 every public method returns None on any failure — an eBay hiccup never
 crashes the batch.
 
-Marketplace Insights: sold_items_search() below is the drop-in point if the
-pending application is ever approved — the rest of the pipeline needs no
-changes, the method just starts returning data instead of raising.
+Marketplace Insights: get_sold_stats() below is the Tier-1 drop-in if the
+pending application is ever approved AND the grant turns out to be
+market-wide. It is gated behind settings.ebay_sold_data_enabled (default off)
+and returns None until then, so the pipeline's tier fallback
+(sold_avg → active-listing stats) is already wired and needs no changes when
+access lands.
 """
 import base64
 import logging
 import statistics
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
@@ -52,6 +56,7 @@ EBAY_BROWSE_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search
 EBAY_BROWSE_ITEM_URL = "https://api.ebay.com/buy/browse/v1/item/{item_id}"
 EBAY_CATALOG_SEARCH_URL = "https://api.ebay.com/commerce/catalog/v1/product_summary/search"
 EBAY_MERCHANDISED_URL = "https://api.ebay.com/buy/marketing/v1_beta/merchandised_product"
+EBAY_INSIGHTS_URL = "https://api.ebay.com/buy/marketplace_insights/v1_beta/item_sales/search"
 
 # How many active listings the ask-stats sample reads (one Browse page).
 # min/median/max are computed over this sample, not eBay's full book — fine
@@ -93,6 +98,36 @@ class EbayListingStats:
     # ePID straight from the search response (live-verified present) — makes
     # the Catalog API unnecessary for ID resolution when it is out of scope.
     top_epid: Optional[str] = None
+
+
+@dataclass
+class EbaySoldStats:
+    """Tier-1 REALIZED-sale stats from Marketplace Insights. Unlike
+    EbayListingStats, these ARE sales evidence: avg_sold_price_30d is an
+    outlier-filtered mean of cleared transactions and the counts may
+    legitimately satisfy the sales-liquidity gate."""
+    avg_sold_price_30d: float
+    sales_count_7d: int
+    sales_count_30d: int
+    sample_size: int                    # sales that survived outlier filtering
+    price_type: str = "sold_avg"
+
+
+def filter_price_outliers(prices: List[float]) -> List[float]:
+    """Drop prices outside 0.5×–2× the median, then beyond ±2 std dev of the
+    survivors' mean — sneaker sold-feeds mix in fakes, kids' sizes, and
+    damaged pairs at wild prices. Small samples (<3) pass through untouched;
+    if filtering would empty the list, the pre-std-dev survivors win."""
+    if len(prices) < 3:
+        return prices
+    med = statistics.median(prices)
+    kept = [p for p in prices if 0.5 * med <= p <= 2 * med] or list(prices)
+    if len(kept) >= 3:
+        mean = statistics.mean(kept)
+        sd = statistics.pstdev(kept)
+        if sd > 0:
+            kept = [p for p in kept if abs(p - mean) <= 2 * sd] or kept
+    return kept
 
 
 @dataclass
@@ -343,22 +378,86 @@ class EbayClient:
                 return rank
         return None
 
-    # ── Marketplace Insights — pending-approval stub ─────────────────────────
+    # ── Marketplace Insights — Tier-1 sold stats (gated, off by default) ─────
 
-    def sold_items_search(self, sku_or_gtin: str):
-        """RESERVED for the Marketplace Insights API (application pending).
+    def get_sold_stats(self, sku_or_gtin: str,
+                       gtin: Optional[str] = None,
+                       epid: Optional[str] = None) -> Optional[EbaySoldStats]:
+        """Tier 1 of the pricing strategy: REALIZED-sale search via
+        Marketplace Insights → outlier-filtered 30-day average sold price plus
+        7/30-day sales counts. Called first by the pipeline; a None return
+        (the normal case today) falls through to the active-listing tier.
 
-        If access is granted, implement this against
-        /buy/marketplace_insights/v1_beta/item_sales/search and have it return
-        realized-sale events shaped like app/services/liquidity.py's
-        summarize_sales_events() input ({"price", "sale_date", "size"}) — at
-        that point sold data may legitimately feed the sales gate and
-        ebay_price_type='sold_avg' becomes valid. Until then this must never
-        be called: eBay support confirmed the grant would still only cover
-        OUR OWN sales, so even an approved key may not be market-wide.
-        """
-        raise NotImplementedError(
-            "eBay Marketplace Insights access not granted — no public API "
-            "exposes market-wide sold-item data (confirmed by eBay dev support, "
-            "July 2026). Do not fabricate sold prices from active listings."
+        Hard-gated behind settings.ebay_sold_data_enabled because eBay support
+        confirmed (July 2026) the pending grant may only cover OUR OWN sales —
+        own-account history must never be presented as market-wide sold data.
+        Fails soft like every other endpoint: 403/no-scope disables it for the
+        process with one warning, and any failure returns None."""
+        if not settings.ebay_sold_data_enabled:
+            self._log_disabled(
+                "insights",
+                "EBAY_SOLD_DATA_ENABLED is off (Marketplace Insights not "
+                "granted market-wide — active-listing tier will be used)",
+            )
+            return None
+
+        now = datetime.utcnow()
+        params = {
+            "limit": 200,
+            "filter": ("lastSoldDate:[{}..{}]".format(
+                (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                now.strftime("%Y-%m-%dT%H:%M:%S.000Z"))),
+        }
+        if epid:
+            params["epid"] = epid
+        elif gtin:
+            params["gtin"] = gtin
+        else:
+            params["q"] = sku_or_gtin
+            params["category_ids"] = settings.ebay_sneaker_category_id
+
+        data = self._get("insights", EBAY_INSIGHTS_URL, params,
+                         context=f"query={sku_or_gtin}")
+        if data is None:
+            return None
+
+        prices: List[float] = []
+        count_7d = count_30d = 0
+        for sale in data.get("itemSales") or []:
+            if not isinstance(sale, dict):
+                continue
+            qty = 1
+            try:
+                qty = max(1, int(sale.get("totalSoldQuantity") or 1))
+            except (TypeError, ValueError):
+                pass
+            count_30d += qty
+            sold_at = _parse_ebay_dt(sale.get("lastSoldDate"))
+            if sold_at is not None and now - sold_at <= timedelta(days=7):
+                count_7d += qty
+            try:
+                prices.append(float((sale.get("lastSoldPrice") or {}).get("value")))
+            except (TypeError, ValueError):
+                continue
+        if not prices:
+            return None
+        # Counts include every reported sale (an outlier price is still a
+        # sale); only the AVERAGE is outlier-filtered.
+        kept = filter_price_outliers(prices)
+        return EbaySoldStats(
+            avg_sold_price_30d=float(statistics.mean(kept)),
+            sales_count_7d=count_7d,
+            sales_count_30d=count_30d,
+            sample_size=len(kept),
         )
+
+
+def _parse_ebay_dt(raw) -> Optional[datetime]:
+    """eBay ISO-8601 timestamp → naive UTC datetime, or None."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")) \
+            .astimezone(timezone.utc).replace(tzinfo=None)
+    except (ValueError, AttributeError):
+        return None

@@ -84,11 +84,17 @@ def _opp_to_dict(o: Opportunity) -> dict:
         "sales_last_30_days": o.sales_last_30_days,
         "last_sale_date":   o.last_sale_date.isoformat() if o.last_sale_date else None,
         "liquidity_status": o.liquidity_status or "unknown",
-        # eBay context — ebay_price is a current ACTIVE ASK (see
-        # ebay_price_type), never a realized sale price; watch count / demand
-        # rank are soft signals and are not sales evidence.
+        # eBay context — ebay_price_type says what ebay_price IS:
+        # 'active_ask' = median of CURRENT listings (a hope, not a sale);
+        # 'sold_avg' = outlier-filtered 30d realized-sale average (Tier 1,
+        # only when Marketplace Insights is granted+enabled). The sales counts
+        # are Tier-1 only (null = unknown, not zero); watch count / demand
+        # rank / listing count are soft supply-popularity signals — the UI
+        # must keep them visually distinct from confirmed sale counts.
         "ebay_price":       float(o.ebay_price) if o.ebay_price is not None else None,
         "ebay_price_type":  o.ebay_price_type,
+        "ebay_sales_count_7d":  o.ebay_sales_count_7d,
+        "ebay_sales_count_30d": o.ebay_sales_count_30d,
         "ebay_min_ask":     float(o.ebay_min_ask) if o.ebay_min_ask is not None else None,
         "ebay_max_ask":     float(o.ebay_max_ask) if o.ebay_max_ask is not None else None,
         "ebay_active_listings": o.ebay_active_listings,

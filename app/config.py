@@ -87,6 +87,18 @@ class Settings(BaseSettings):
     # ask-stats/demand signals are secondary, so they refresh slower than
     # StockX market data.
     ebay_market_ttl_hours: float = 12.0
+    # Tier-1 sold data (EbayClient.get_sold_stats → Marketplace Insights).
+    # Flip ONLY once eBay has granted genuinely MARKET-WIDE sold-item access —
+    # the pending grant may cover our own sales only, which must not be
+    # presented as market history. Off (default): get_sold_stats() returns
+    # None and the pipeline stays on the active-listing tier.
+    ebay_sold_data_enabled: bool = False
+
+    # How long a successful cart verification (SupplierProductSize.
+    # verified_cartable_at) keeps vouching for a size when a later run's probe
+    # is inconclusive. Past this, a cached-profitable SKU is escalated to a
+    # full fresh re-check instead of being refreshed from cache.
+    cart_verification_ttl_hours: float = 6.0
 
     browser_headless: bool = True
     browser_state_dir: str = "data/browser_state"

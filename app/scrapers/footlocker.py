@@ -11,17 +11,20 @@ or 406; in that case the only reliable fix is Playwright + playwright-stealth
 (or a residential-proxy service).  The scraper logs a clear message when
 blocked so you know exactly what happened.
 """
+import asyncio
 import uuid
 import logging
 import httpx
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional
 
 import random
 import time as _time
 
 from app import runtime
 from app.scrapers.base import (
-    ScrapedProduct, ScrapedSize, ScraperStats, is_valid_sku, normalize_size, rate_limit
+    ScrapedProduct, ScrapedSize, ScraperStats, is_valid_sku, normalize_size, rate_limit,
+    verify_cartable,
 )
 from app.config import settings
 
@@ -96,6 +99,49 @@ def _html_headers(site_url: str) -> dict:
     }
 
 
+# Date-ish keys the Footlocker family uses for launch/release timestamps —
+# seen at the detail top level, on variantAttributes, and on styleVariants
+# depending on banner/payload version.
+_RELEASE_DATE_KEYS = ("skuLaunchDate", "launchDate", "releaseDate", "launchTime")
+
+
+def _parse_release_dt(raw) -> "Optional[datetime]":
+    """ISO-8601 string or epoch millis → naive UTC datetime, else None."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            return datetime.utcfromtimestamp(raw / 1000.0 if raw > 1e11 else raw)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+    except (ValueError, AttributeError):
+        return None
+
+
+def _future_release_date(detail: dict, listing: Optional[dict] = None) -> "Optional[datetime]":
+    """The product's launch/release timestamp when it is confidently in the
+    FUTURE (clock-skew tolerant), else None. Scans known date keys on the
+    detail payload, its variantAttributes/styleVariants entries, and the
+    search listing."""
+    candidates = []
+    for container in (detail, listing or {}):
+        if isinstance(container, dict):
+            candidates.append(container)
+    for key in ("variantAttributes", "styleVariants"):
+        for entry in detail.get(key) or []:
+            if isinstance(entry, dict):
+                candidates.append(entry)
+    for obj in candidates:
+        for key in _RELEASE_DATE_KEYS:
+            dt = _parse_release_dt(obj.get(key))
+            if dt and dt > datetime.utcnow() + timedelta(hours=1):
+                return dt
+    return None
+
+
 def _first_image_url(payload: Optional[dict]) -> Optional[str]:
     """Best-effort primary image from a Footlocker search/detail payload.
     The images block varies by banner ({'images': [{'url': ...}]} vs plain
@@ -116,25 +162,34 @@ def _first_image_url(payload: Optional[dict]) -> Optional[str]:
 
 class FootlockerScraper:
     PAGE_SIZE = 120
-    # Footlocker's cart flow sits behind Akamai bot protection and its size
-    # entries carry no cart-addable variant id — per-size cart validation is
-    # not supported; inventory confidence caps at VERIFIED_INVENTORY (the
-    # detail endpoint's per-size stockLevelStatus).
+    # Per-size opportunity-time cart validation (validate_cart) stays
+    # unsupported — that flow needs a sustained authenticated bag session
+    # behind Akamai. The scrape-phase product-level cart PROBE below
+    # (base.verify_cartable + _check_cartable) IS supported: one bag-add per
+    # product claiming stock, which catches launch/pre-release pages whose
+    # detail feed reports stockLevelStatus=instock before sales have opened.
     supports_cart_validation = False
 
-    def __init__(self, supplier_url: str):
+    # Kept lower than Shopify's 4 — the bag endpoint is the most
+    # bot-scrutinized path on the Foot Locker platform.
+    CART_CHECK_CONCURRENCY = 2
+
+    def __init__(self, supplier_url: str, transport: Optional[httpx.BaseTransport] = None):
         domain = self._detect_domain(supplier_url)
         cfg = SITE_CONFIG.get(domain, SITE_CONFIG["footlocker.com"])
         self.api_base = cfg["api_base"]
         self.site_url = cfg["site_url"]
         self._domain = domain
         self.stats = ScraperStats()
+        self._transport = transport            # tests inject a MockTransport
+        self._csrf_token: Optional[str] = None # None = not fetched; "" = fetch failed
 
     def scrape(self) -> List[ScrapedProduct]:
         results: List[ScrapedProduct] = []
 
         # Use a persistent session so cookies are shared between homepage and API calls
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
+        with httpx.Client(timeout=30, follow_redirects=True,
+                          transport=self._transport) as client:
             # Step 1: visit homepage to collect Akamai / session cookies
             self._init_session(client)
 
@@ -209,8 +264,84 @@ class FootlockerScraper:
                     logger.error(f"{self._domain} scrape error on page {page}: {exc}")
                     break
 
+            # Hard gate: stockLevelStatus=instock is not proof sales have
+            # opened (launch/pre-release pages report it before the release).
+            # One bag-add probe per product claiming stock, same semantics as
+            # Shopify's — see base.verify_cartable.
+            results = asyncio.run(self._verify_cartable(client, results))
+
         logger.info(f"{self._domain} — found {len(results)} products")
         return results
+
+    # ── Cart availability verification ────────────────────────────────────────
+
+    async def _verify_cartable(self, client: httpx.Client,
+                               products: List[ScrapedProduct]) -> List[ScrapedProduct]:
+        # CSRF fetched once, before the concurrent probes, so they can't race
+        # the lazy fetch across to_thread workers.
+        if any(any(s.in_stock and s.variant_id for s in p.sizes) for p in products):
+            self._get_csrf_token(client)
+
+        async def probe(product: ScrapedProduct) -> Optional[str]:
+            target = next((s for s in product.sizes if s.in_stock and s.variant_id), None)
+            if target is None:
+                return None   # no sellable-unit code captured — can't probe
+            # _check_cartable is sync httpx (client is thread-safe); run it off
+            # the event loop so the semaphore still bounds real concurrency.
+            return await asyncio.to_thread(self._check_cartable, client, target.variant_id)
+
+        return await verify_cartable(products, probe, self.CART_CHECK_CONCURRENCY,
+                                     stats=self.stats, supplier_label=self._domain)
+
+    def _get_csrf_token(self, client: httpx.Client) -> Optional[str]:
+        """The bag endpoint wants the session CSRF token the SPA fetches from
+        /api/session. Fetched once per scrape; failure is non-fatal — the
+        probe still POSTs and classifies whatever comes back."""
+        if self._csrf_token is not None:
+            return self._csrf_token or None
+        self._csrf_token = ""
+        try:
+            resp = client.get(f"{self.api_base}/session",
+                              headers=_api_headers(self.site_url))
+            if resp.status_code == 200:
+                data = resp.json().get("data") or {}
+                self._csrf_token = str(data.get("csrfToken") or "")
+        except (httpx.RequestError, ValueError) as exc:
+            logger.debug(f"{self._domain}: session/CSRF fetch failed: {exc}")
+        return self._csrf_token or None
+
+    def _check_cartable(self, client: httpx.Client, variant_id: str) -> str:
+        """
+        POST one sellable-unit code to the bag endpoint to probe whether the
+        size is actually purchasable right now. Returns:
+          "ok"           — the store accepted the bag addition
+          "blocked"      — the API understood the request and refused
+                           (400/404/412/422 — launch not open, not buyable)
+          "inconclusive" — Akamai 403/406, throttle (429), auth (401), server
+                           error, or network failure; NOT a stock verdict —
+                           a bot-blocked probe must never zero real inventory
+        """
+        headers = {
+            **_api_headers(self.site_url),
+            "x-fl-request-id": str(uuid.uuid4()),
+            "Content-Type": "application/json",
+        }
+        csrf = self._csrf_token or None
+        if csrf:
+            headers["x-csrf-token"] = csrf
+        try:
+            resp = client.post(
+                f"{self.api_base}/users/carts/current/entries",
+                json={"productQuantity": 1, "productId": variant_id},
+                headers=headers,
+            )
+        except httpx.RequestError:
+            return "inconclusive"
+        if 200 <= resp.status_code < 300:
+            return "ok"
+        if resp.status_code in (400, 404, 412, 422):
+            return "blocked"
+        return "inconclusive"
 
     # ── Session init ──────────────────────────────────────────────────────────
 
@@ -248,6 +379,19 @@ class FootlockerScraper:
         if not sku:
             self.stats.sku_parse_failed += 1
             return None
+
+        # Future-release gate — independent of the cart probe: some launch
+        # pages report stockLevelStatus=instock (and can even accept a bag-add)
+        # before the release actually opens.
+        release_at = _future_release_date(detail, raw)
+        if release_at and any(s.in_stock for s in sizes):
+            logger.info(
+                f"[{self._domain}] {sku} — preorder/future release detected "
+                f"(launches {release_at:%Y-%m-%d %H:%M} UTC), excluding despite "
+                "in-stock/cartable status"
+            )
+            for s in sizes:
+                s.in_stock = False
         if not sizes:
             self.stats.size_parse_failed += 1
         if price <= 0:
@@ -295,6 +439,11 @@ class FootlockerScraper:
         if not sku:
             return None, []
 
+        # Sellable-unit codes are the cart-addable ids the bag endpoint wants;
+        # depending on banner/payload version they live on the size entry
+        # itself or in a parallel sellableUnits block keyed by size attribute.
+        unit_codes, unit_stock = FootlockerScraper._sellable_units_by_size(detail)
+
         sizes: List[ScrapedSize] = []
         for variant_group in detail.get("variants", []):
             if variant_group.get("type", "").upper() != "SIZE":
@@ -308,9 +457,45 @@ class FootlockerScraper:
                 price = float(
                     entry.get("price", {}).get("value", fallback_price) or fallback_price
                 )
-                sizes.append(ScrapedSize(size=size, price=price, in_stock=in_stock))
+                variant_id = None
+                for key in ("code", "sku", "skuId", "id"):
+                    if entry.get(key):
+                        variant_id = str(entry[key])
+                        break
+                sizes.append(ScrapedSize(size=size, price=price, in_stock=in_stock,
+                                         variant_id=variant_id or unit_codes.get(size)))
+
+        # Payloads that carry no variants block at all still describe sizes in
+        # sellableUnits — parse those rather than dropping the product.
+        if not sizes and unit_codes:
+            for size, code in unit_codes.items():
+                sizes.append(ScrapedSize(
+                    size=size, price=fallback_price,
+                    in_stock=unit_stock.get(size, False), variant_id=code,
+                ))
 
         return sku, sizes
+
+    @staticmethod
+    def _sellable_units_by_size(detail: dict) -> "tuple[Dict[str, str], Dict[str, bool]]":
+        """(size → sellable-unit code, size → in_stock) from the detail
+        payload's sellableUnits block; empty dicts when absent/unrecognized."""
+        codes: Dict[str, str] = {}
+        stock: Dict[str, bool] = {}
+        for unit in detail.get("sellableUnits") or []:
+            if not isinstance(unit, dict) or not unit.get("code"):
+                continue
+            raw_size = next(
+                (a.get("value") for a in unit.get("attributes") or []
+                 if isinstance(a, dict) and a.get("type", "").lower() == "size"),
+                None,
+            )
+            size = normalize_size(str(raw_size or "").strip())
+            if size is None or size in codes:
+                continue
+            codes[size] = str(unit["code"])
+            stock[size] = str(unit.get("stockLevelStatus", "")).lower() == "instock"
+        return codes, stock
 
     @staticmethod
     def _detect_domain(url: str) -> str:

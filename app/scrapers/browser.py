@@ -14,12 +14,17 @@ but is empty by default since none is configured yet. Expect meaningfully
 worse reliability running headless on a server with no proxy than running
 locally during development.
 
-`use_stealth` exists per-platform because stealth patching isn't uniformly
-safe: live testing found playwright-stealth's overrides collide with GOAT's
-own bot-detection script (it reads `navigator.userAgent` in a way our patch
-breaks), throwing a ReferenceError that crashes React hydration before any
-page content loads. GOAT's session should be built with `use_stealth=False`.
-StockX did not show this issue.
+Browser engine: patchright (a patched Chromium build), not stock Playwright —
+it closes CDP-level leaks (e.g. bot-detection scripts probing for the
+`Runtime.enable` call every plain-Playwright session makes) that JS-only
+patching can't. Do NOT layer playwright-stealth's `stealth_sync` on top of
+it: live-verified 2026-07-31, stacking the two got StockX's Cloudflare rule
+to 403 every request (both search and product pages), while patchright alone
+(no stealth_sync) passed clean — the two patch layers collide into a
+detectable signature. This also removes the old GOAT-specific crash
+(stealth_sync's navigator overrides used to break GOAT's own bot-detection
+script and crash React hydration) since stealth_sync is no longer applied to
+either platform.
 
 IMPORTANT thread-affinity note, confirmed live: starting a Playwright sync
 session leaves that thread's asyncio state such that `asyncio.run()` calls
@@ -37,8 +42,9 @@ import logging
 import sys
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import unquote, urlsplit
 
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Response
+from patchright.sync_api import sync_playwright, Page, BrowserContext, Response
 
 
 def _init_worker_event_loop() -> None:
@@ -56,11 +62,6 @@ def _init_worker_event_loop() -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
-try:
-    from playwright_stealth import stealth_sync
-except ImportError:  # pragma: no cover - fallback if the package is ever removed/broken
-    stealth_sync = None
-
 logger = logging.getLogger(__name__)
 
 _USER_AGENT = (
@@ -68,13 +69,23 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Hand-rolled fallback masking, used only if playwright-stealth is unavailable.
-_MANUAL_STEALTH_SCRIPT = """
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-window.chrome = window.chrome || { runtime: {} };
-"""
+
+def _proxy_config(proxy_url: str) -> dict:
+    """Split a `scheme://user:pass@host:port` string into Playwright's proxy
+    shape. Chromium's --proxy-server does NOT accept embedded userinfo in the
+    server URL — credentials must go in separate username/password fields, or
+    every request 407s (live-verified: curl authenticates fine with the same
+    URL string, Playwright doesn't)."""
+    parsed = urlsplit(proxy_url)
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    config = {"server": f"{parsed.scheme}://{netloc}"}
+    if parsed.username:
+        config["username"] = unquote(parsed.username)
+    if parsed.password:
+        config["password"] = unquote(parsed.password)
+    return config
 
 
 class BrowserSession:
@@ -100,14 +111,12 @@ class BrowserSession:
         proxy_url: str = "",
         state_dir: str = "data/browser_state",
         nav_timeout_ms: int = 30000,
-        use_stealth: bool = True,
         playwright=None,
     ):
         self.platform = platform
         self.headless = headless
         self.proxy_url = proxy_url
         self.nav_timeout_ms = nav_timeout_ms
-        self.use_stealth = use_stealth
         self._state_path = Path(state_dir) / f"{platform}.json"
 
         self._playwright = playwright
@@ -135,7 +144,7 @@ class BrowserSession:
         if self._state_path.exists():
             context_kwargs["storage_state"] = str(self._state_path)
         if self.proxy_url:
-            context_kwargs["proxy"] = {"server": self.proxy_url}
+            context_kwargs["proxy"] = _proxy_config(self.proxy_url)
 
         self._context = self._browser.new_context(**context_kwargs)
         self._context.set_default_navigation_timeout(self.nav_timeout_ms)
@@ -146,13 +155,7 @@ class BrowserSession:
         )
 
     def new_page(self) -> Page:
-        page = self._context.new_page()
-        if self.use_stealth:
-            if stealth_sync is not None:
-                stealth_sync(page)
-            else:
-                page.add_init_script(_MANUAL_STEALTH_SCRIPT)
-        return page
+        return self._context.new_page()
 
     def save_state(self) -> None:
         if self._context is None:

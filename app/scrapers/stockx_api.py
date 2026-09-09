@@ -318,6 +318,29 @@ def _amount(val) -> Optional[float]:
         return None
 
 
+def _sales_count(row: dict) -> Optional[int]:
+    """Defensive read of a per-variant 72-hour sales count under the names
+    StockX has used for it elsewhere (salesInformation.salesLast72Hours on
+    the site API; flat variants seen in community captures). None when the
+    row carries no such field — the documented reality for the public API."""
+    containers = [row]
+    si = row.get("salesInformation")
+    if isinstance(si, dict):
+        containers.insert(0, si)
+    std = row.get("standardMarketData")
+    if isinstance(std, dict):
+        containers.append(std)
+    for c in containers:
+        for key in ("salesLast72Hours", "salesLast72hours", "salesCount"):
+            val = c.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
 class StockXAPIClient:
     """Thread-safe: httpx.Client is safe for concurrent requests, and the
     shared limiter/token manager hold their own locks. Workers in the lookup
@@ -545,6 +568,7 @@ class StockXAPIClient:
                     self._warn_shape("catalog/market-data", market)
                 rows = []
 
+            sales_72h_total: Optional[int] = None
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -555,29 +579,50 @@ class StockXAPIClient:
                 # Live-verified: the public market-data endpoint has NO
                 # last-sale field — this stays None unless StockX adds one.
                 last_sale = _amount(row.get("lastSaleAmount") or row.get("lastSale"))
+                # Opportunistic sales-volume parse: no sales-count field exists
+                # today (live-verified 2026-07-17), but if StockX ever ships
+                # one under the commonly-seen names, it lights up here without
+                # further code changes.
+                row_sales = _sales_count(row)
+                if row_sales is not None:
+                    sales_72h_total = (sales_72h_total or 0) + row_sales
                 if lowest_ask is None and highest_bid is None and last_sale is None:
                     continue
                 sizes.append(StockXSizeMarket(
                     size=size, lowest_ask=lowest_ask,
                     highest_bid=highest_bid, last_sale=last_sale,
                 ))
+            if rows and sales_72h_total is None \
+                    and "market-data:sales-count" not in self._shape_warned:
+                self._shape_warned.add("market-data:sales-count")
+                logger.warning(
+                    "[stockx-api shape] market-data rows carry no sales-count field "
+                    "(looked for salesInformation.salesLast72Hours / salesLast72Hours "
+                    "/ salesCount) — matches the live-verified 2026-07-17 schema. "
+                    "Sales counts stay None from the official API; the browser "
+                    "sales-history scrape / Alias / eBay sold tier are the sources."
+                )
 
             if not sizes:
                 return StockXLookupResult(sku=sku, product=None, matched_by=matched_by,
                                           failure_reason="no_market_data")
 
             url_key = product.get("urlKey") or ""
-            return StockXLookupResult(
+            out = StockXProduct(
                 sku=sku,
-                matched_by=matched_by,
-                product=StockXProduct(
-                    sku=sku,
-                    name=product.get("title") or name,
-                    url_key=url_key,
-                    stockx_url=f"https://stockx.com/{url_key}" if url_key else "https://stockx.com",
-                    sizes=sizes,
-                ),
+                name=product.get("title") or name,
+                url_key=url_key,
+                stockx_url=f"https://stockx.com/{url_key}" if url_key else "https://stockx.com",
+                sizes=sizes,
             )
+            if sales_72h_total is not None:
+                # A 72-hour count is a valid LOWER BOUND on the 7-day window
+                # (every such sale is inside it); 30 days can't be derived, so
+                # it stays None (unknown) rather than a fabricated number.
+                out.sales_last_7_days = sales_72h_total
+                logger.info(f"StockX API: {sku} — {sales_72h_total} sale(s) in the "
+                            "last 72h (used as the 7-day lower bound)")
+            return StockXLookupResult(sku=sku, matched_by=matched_by, product=out)
         except StockXBudgetExhausted:
             raise
         except StockXRequestFailed as exc:
