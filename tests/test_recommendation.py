@@ -63,14 +63,21 @@ class TestUnknownFallback:
 
 
 class TestEbayReference:
-    def test_reference_is_labeled_active_ask(self):
-        ref = compute_ebay_reference(cost=100.0, active_ask=200.0)
+    def test_reference_is_labeled_active_ask_by_default(self):
+        ref = compute_ebay_reference(cost=100.0, price=200.0)
         assert ref.price_type == "active_ask"
         # >= $150 → Authenticity Guarantee flat 8%, no per-order fee
         assert ref.fees == 200.0 * 0.08
         assert ref.payout == 200.0 - 16.0
         assert ref.margin == 84.0
 
+    def test_sold_tier_keeps_its_label(self):
+        # Tier-1 sold data runs the same math but must stay labeled sold_avg
+        # so the UI can tell a realized average from a hoped-for ask.
+        ref = compute_ebay_reference(cost=100.0, price=200.0, price_type="sold_avg")
+        assert ref.price_type == "sold_avg"
+        assert ref.price == 200.0
+
     def test_below_auth_threshold_uses_standard_fvf(self):
-        ref = compute_ebay_reference(cost=50.0, active_ask=100.0)
+        ref = compute_ebay_reference(cost=50.0, price=100.0)
         assert abs(ref.fees - (100.0 * 0.1325 + 0.30)) < 1e-9

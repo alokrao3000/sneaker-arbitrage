@@ -12,7 +12,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 from app.config import settings
 from app.scrapers.browser import BrowserSession
@@ -84,7 +84,6 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
         proxy_url=settings.goat_proxy_url,
         state_dir=settings.browser_state_dir,
         nav_timeout_ms=settings.browser_nav_timeout_ms,
-        use_stealth=False,  # stealth patches crash GOAT's own bot-detection JS
         playwright=playwright,
     )
     goat_session.start()
@@ -121,6 +120,18 @@ def _lookup_sku(sku: str, name: str, cost: Optional[float]) -> dict:
                     alias.close()
             except ValueError:
                 pass  # no/invalid ALIAS_API_KEY
+
+        # StockX-derived sales volume (browser sales-history interception /
+        # future API count field) — same fallback order as the batch pipeline
+        # in app/services/arbitrage.py, so the two never diverge.
+        if (not liq_snapshot.known and stockx_data is not None
+                and (stockx_data.sales_last_7_days is not None
+                     or stockx_data.sales_last_30_days is not None)):
+            liq_snapshot = LiquiditySnapshot(
+                sales_last_7_days=stockx_data.sales_last_7_days,
+                sales_last_30_days=stockx_data.sales_last_30_days,
+                source="stockx_page" if stockx_data.sales_events else "stockx_api",
+            )
 
         if not stockx_data and not goat_data and alias_lowest_ask is None:
             raise HTTPException(status_code=404, detail=f"No market data found for SKU {sku}")

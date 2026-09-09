@@ -4,8 +4,9 @@ This covers the majority of Tier 0/QS and Shopify-column stores in the CSV.
 """
 import asyncio
 import logging
+import re
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -16,6 +17,7 @@ from app import runtime
 from app.scrapers.base import (
     ScrapedProduct, ScrapedSize, ScraperStats, CartValidationResult,
     is_valid_sku, extract_base_sku, normalize_size, async_rate_limit,
+    verify_cartable,
     CART_OK, CART_OUT_OF_STOCK, CART_SIZE_UNAVAILABLE, CART_REJECTED,
     CART_QUANTITY_LIMIT, CART_PRODUCT_UNAVAILABLE, CART_RATE_LIMITED,
     CART_NETWORK_ERROR, CART_UNKNOWN_RESPONSE,
@@ -54,6 +56,12 @@ _TYPE_PARTIALS = ("shoe", "sneaker", "footwear", "trainer", "running")
 
 # Partial tag keywords — checked if SNEAKER_TAGS intersection fails
 _TAG_PARTIALS = ("shoe", "sneaker", "footwear")
+
+# Preorder/presale detection — a preorder page can report available=true AND
+# accept a cart-add, so this signal is independent of (and overrides) the
+# cart probe. Matched against tags and the title.
+_PREORDER_RE = re.compile(r"pre[\s_-]?(order|sale|release|launch)|coming[\s_-]?soon",
+                          re.IGNORECASE)
 
 # Model names / silhouette keywords checked against the product title last
 # (most expensive check — only reached if type + tag checks both fail)
@@ -244,40 +252,18 @@ class ShopifyScraper:
     async def _filter_cartable(
         self, client: httpx.AsyncClient, products: List[ScrapedProduct]
     ) -> List[ScrapedProduct]:
-        """
-        For each product that has at least one available size, probe one variant
-        against the cart. Definitively blocked products (pre-drop, notify-me)
-        have all sizes marked not-in-stock; every product records its probe
-        outcome in .cart_probe so downstream confidence levels are honest.
-
-        Checks run concurrently (up to _CART_CHECK_CONCURRENCY at a time) to avoid
-        the O(n × delay) wall-clock cost of sequential probing.
-        """
-        to_check = [
-            p for p in products
-            if any(s.in_stock and s.variant_id for s in p.sizes)
-        ]
-        if not to_check:
-            return products
-
-        sem = asyncio.Semaphore(_CART_CHECK_CONCURRENCY)
-
-        async def _probe(product: ScrapedProduct) -> None:
+        """One cart probe per product claiming stock, via the shared
+        base.verify_cartable gate (semantics documented there): blocked
+        products get every size marked not-in-stock, every probed product
+        records its outcome in .cart_probe."""
+        async def probe(product: ScrapedProduct) -> Optional[str]:
             available = [s for s in product.sizes if s.in_stock and s.variant_id]
-            async with sem:
-                outcome = await self._check_cartable(client, available[0].variant_id)
-            product.cart_probe = outcome
-            self.stats.cart_probes += 1
-            if outcome == "blocked":
-                self.stats.cart_probe_blocked += 1
-                logger.debug(f"Cart blocked for '{product.name}' — marking as unavailable")
-                for s in product.sizes:
-                    s.in_stock = False
-            elif outcome == "inconclusive":
-                self.stats.cart_probe_inconclusive += 1
+            if not available:
+                return None   # no variant id captured — can't probe
+            return await self._check_cartable(client, available[0].variant_id)
 
-        await asyncio.gather(*[_probe(p) for p in to_check])
-        return products
+        return await verify_cartable(products, probe, _CART_CHECK_CONCURRENCY,
+                                     stats=self.stats, supplier_label=self.base_url)
 
     # ── Per-size cart validation (called at opportunity time) ────────────────
 
@@ -453,6 +439,18 @@ class ShopifyScraper:
             self.stats.price_parse_failed += 1
         self.stats.parsed += 1
 
+        # Preorder/future-release gate — independent of the cart probe, because
+        # preorder pages report available=true and often accept a cart-add.
+        published_at = _parse_shopify_dt(raw.get("published_at"))
+        preorder_why = self._preorder_signal(raw, published_at)
+        if preorder_why and any(s.in_stock for s in sizes):
+            logger.info(
+                f"[{self.base_url}] {base_sku.upper()} — preorder/future release "
+                f"detected ({preorder_why}), excluding despite available/cartable status"
+            )
+            for s in sizes:
+                s.in_stock = False
+
         handle = raw.get("handle", "")
         images = raw.get("images") or []
         image_url = images[0].get("src") if images and isinstance(images[0], dict) else None
@@ -462,9 +460,25 @@ class ShopifyScraper:
             url=f"{self.base_url}/products/{handle}",
             original_price=base_price,
             sizes=sizes,
-            published_at=_parse_shopify_dt(raw.get("published_at")),
+            published_at=published_at,
             image_url=image_url,
         )
+
+    @staticmethod
+    def _preorder_signal(raw: dict, published_at: Optional[datetime]) -> Optional[str]:
+        """Reason string when this product looks like a preorder/unreleased
+        listing, else None. Signals: a preorder/presale/coming-soon tag or
+        title, or a published_at in the future (clock-skew tolerant)."""
+        for tag in raw.get("tags", []) or []:
+            if _PREORDER_RE.search(str(tag)):
+                return f"tag '{tag}'"
+        title = raw.get("title", "") or ""
+        m = _PREORDER_RE.search(title)
+        if m:
+            return f"title contains '{m.group(0)}'"
+        if published_at and published_at > datetime.utcnow() + timedelta(hours=1):
+            return f"published_at in the future ({published_at:%Y-%m-%d})"
+        return None
 
     # ── Size extraction helpers ───────────────────────────────────────────────
 

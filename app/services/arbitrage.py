@@ -26,7 +26,7 @@ import logging
 import time
 import concurrent.futures
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Callable, Tuple
 
 from app import runtime
@@ -34,7 +34,7 @@ from app import runtime
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
-from playwright.sync_api import sync_playwright
+from patchright.sync_api import sync_playwright
 
 from app.config import settings
 from app.database import (
@@ -86,7 +86,7 @@ class ScrapeInterrupted(RuntimeError):
     with this message instead of hanging the interpreter."""
 
 
-def _make_browser_client(platform: str, client_cls, use_stealth: bool = True):
+def _make_browser_client(platform: str, client_cls):
     """Build a client whose entire lifecycle (Playwright start, browser
     launch, every method call, teardown) runs on one dedicated thread — see
     BrowserSession's module docstring: Playwright's sync API and
@@ -104,7 +104,6 @@ def _make_browser_client(platform: str, client_cls, use_stealth: bool = True):
             proxy_url=proxy_url,
             state_dir=settings.browser_state_dir,
             nav_timeout_ms=settings.browser_nav_timeout_ms,
-            use_stealth=use_stealth,
             playwright=pw,
         )
         session.start()
@@ -260,7 +259,7 @@ def run_full_scrape(
              "+ run scripts/stockx_auth.py to switch to the official API)")
         stockx, _stockx_teardown = _make_browser_client("stockx", StockXBrowserClient)
 
-    goat, _goat_teardown = _make_browser_client("goat", GoatBrowserClient, use_stealth=False)
+    goat, _goat_teardown = _make_browser_client("goat", GoatBrowserClient)
 
     # eBay: demand proxies only (active-ask stats + watch/merchandising
     # signals) — no public API exposes market-wide sold data, so eBay never
@@ -411,14 +410,28 @@ def run_full_scrape(
             # One decision per SKU using the lowest effective price among the
             # duplicates a scrape can produce for the same base SKU.
             gate_price: Dict[str, float] = {}
+            products_by_sku: Dict[str, List[ScrapedProduct]] = {}
             for product in products:
+                products_by_sku.setdefault(product.sku, []).append(product)
                 eff = _gate_effective_price(supplier, product)
                 if product.sku not in gate_price or eff < gate_price[product.sku]:
                     gate_price[product.sku] = eff
-            decisions: Dict[str, GateDecision] = {
-                sku: sku_cache.gate_stockx_check(db, sku, price)
-                for sku, price in gate_price.items()
-            }
+            decisions: Dict[str, GateDecision] = {}
+            for sku, price in gate_price.items():
+                d = sku_cache.gate_stockx_check(db, sku, price)
+                # Cached-profitable is a MARKET verdict; refuse to shortcut on
+                # it unless the SUPPLIER side is verifiably still buyable
+                # (fresh cart probe, or a persisted verification inside the
+                # TTL). Otherwise escalate to the full must-re-check branch —
+                # a delayed/pulled release discovered after caching must not
+                # keep resurfacing from the cache path.
+                if d.evaluate_from_cache and not _cartable_evidence_ok(
+                        db, supplier, sku, products_by_sku[sku]):
+                    emit(f"    [{supplier.name}] {sku} — cached-profitable but cart "
+                         "verification is missing/stale/failed; forcing fresh re-check")
+                    d = GateDecision(check=True, reason="cart_unverified",
+                                     cached=d.cached)
+                decisions[sku] = d
 
             # ── B3+B4 interleaved: prefetch a small CHUNK of StockX lookups,
             # evaluate + COMMIT that chunk, then move to the next. Bounds the
@@ -645,6 +658,70 @@ def deactivate_stale_opportunities(db: Session, supplier_id: int,
     )
 
 
+# ── Cartability guard for the cached-evaluation path ──────────────────────────
+
+def _cartable_evidence_ok(db: Session, supplier: Supplier, sku: str,
+                          products: List[ScrapedProduct],
+                          now: Optional[datetime] = None) -> bool:
+    """May a cached-profitable verdict for this SKU be refreshed WITHOUT a
+    fresh market re-check? The cache gate only proves the market side was
+    evaluated — this proves the supplier side is still actually buyable:
+
+      - a product with no sizes claiming stock trivially passes (it can't
+        produce an opportunity, so escalating would only burn budget);
+      - this run's cart probe succeeding ("ok") passes;
+      - otherwise the last PERSISTED successful verification
+        (SupplierProductSize.is_cartable + verified_cartable_at) must be
+        younger than settings.cart_verification_ttl_hours.
+
+    False means: treat exactly like the must-re-check branch — the caller
+    replaces the gate decision with check=True (reason 'cart_unverified')."""
+    now = now or datetime.utcnow()
+    claiming = [p for p in products if p.available_sizes()]
+    if not claiming:
+        return True
+    if any(p.cart_probe == "ok" for p in claiming):
+        return True
+    ttl = timedelta(hours=settings.cart_verification_ttl_hours)
+    verified = (
+        db.query(SupplierProductSize.id)
+        .join(SupplierProduct,
+              SupplierProductSize.supplier_product_id == SupplierProduct.id)
+        .filter(
+            SupplierProduct.supplier_id == supplier.id,
+            SupplierProduct.sku == sku,
+            SupplierProductSize.is_cartable.is_(True),
+            SupplierProductSize.verified_cartable_at >= now - ttl,
+        )
+        .first()
+    )
+    return verified is not None
+
+
+def _stamp_size_cartable(db: Session, supplier_id: int, sku: str, size: str,
+                         ok: bool, now: Optional[datetime] = None):
+    """Persist an opportunity-time validate_cart outcome onto the matching
+    SupplierProductSize row (definitive outcomes only — inconclusive results
+    never touch the stamp)."""
+    now = now or datetime.utcnow()
+    row = (
+        db.query(SupplierProductSize)
+        .join(SupplierProduct,
+              SupplierProductSize.supplier_product_id == SupplierProduct.id)
+        .filter(
+            SupplierProduct.supplier_id == supplier_id,
+            SupplierProduct.sku == sku,
+            SupplierProductSize.size == size,
+        )
+        .first()
+    )
+    if row is None:
+        return
+    row.is_cartable = ok
+    if ok:
+        row.verified_cartable_at = now
+
+
 # ── Per-product evaluation ────────────────────────────────────────────────────
 
 def _gate_effective_price(supplier: Supplier, product: ScrapedProduct) -> float:
@@ -790,6 +867,24 @@ def _evaluate_product(
     if not liq_snapshot.known:
         liq_snapshot = liquidity_svc.snapshot_from_sale_records(db, product.sku)
 
+    # StockX-derived sales volume (browser sales-history interception, or the
+    # official API's count field if StockX ever ships one) — realized sales,
+    # so it may feed the gate. Itemized events also go to sale_records so the
+    # 30-day history fallback keeps working when later runs are cache-only.
+    if stockx_data is not None:
+        if fresh and stockx_data.sales_events:
+            _upsert_sale_records(db, product.sku, "stockx", stockx_data.sales_events)
+        if not liq_snapshot.known and (stockx_data.sales_last_7_days is not None
+                                       or stockx_data.sales_last_30_days is not None):
+            event_dates = [e["sale_date"] for e in (stockx_data.sales_events or [])
+                           if e.get("sale_date")]
+            liq_snapshot = LiquiditySnapshot(
+                sales_last_7_days=stockx_data.sales_last_7_days,
+                sales_last_30_days=stockx_data.sales_last_30_days,
+                last_sale_date=max(event_dates) if event_dates else None,
+                source="stockx_page" if stockx_data.sales_events else "stockx_api",
+            )
+
     # ── eBay context (demand proxies — never sales evidence) ─────────────────
     # Fetched at most once per SKU per TTL via its own cache gate; only on
     # fresh evaluations so cached passes stay zero-network. A None context
@@ -798,6 +893,20 @@ def _evaluate_product(
     if ebay_client is not None and fresh and sku_cache.gate_ebay_check(db, product.sku):
         ebay_ctx = _fetch_ebay_context(ebay_client, product, emit)
         sku_cache.record_ebay_check(db, product.sku)
+
+    # Tier-1 sold data is genuine sales evidence, so it may satisfy the hard
+    # sales gate when no other source knows this SKU. The active-listing tier
+    # structurally can't get here: its sales counts are always None and its
+    # price_type is never 'sold_avg'.
+    if (ebay_ctx is not None and ebay_ctx.price_type == "sold_avg"
+            and not liq_snapshot.known
+            and (ebay_ctx.sales_count_7d is not None
+                 or ebay_ctx.sales_count_30d is not None)):
+        liq_snapshot = LiquiditySnapshot(
+            sales_last_7_days=ebay_ctx.sales_count_7d,
+            sales_last_30_days=ebay_ctx.sales_count_30d,
+            source="ebay_sold",
+        )
 
     # ── Classify each in-stock size ──────────────────────────────────────────
     opps_created = 0
@@ -844,12 +953,14 @@ def _evaluate_product(
             liquidity_snapshot=liq_snapshot,
             highest_bid=highest_bid,
         )
-        # eBay reference margin (vs the median ACTIVE ask) + where-to-sell
-        # recommendation. classify_opportunity has no eBay inputs, so nothing
-        # here can influence the sales gate above.
+        # eBay reference margin (vs the Tier-1 sold avg when available, else
+        # the median ACTIVE ask) + where-to-sell recommendation.
+        # classify_opportunity has no eBay inputs, so nothing here can
+        # influence the margin math above.
         ebay_ref: Optional[EbayReference] = None
-        if ebay_ctx is not None and ebay_ctx.median_ask:
-            ebay_ref = compute_ebay_reference(result.cost, ebay_ctx.median_ask)
+        if ebay_ctx is not None and ebay_ctx.price:
+            ebay_ref = compute_ebay_reference(result.cost, ebay_ctx.price,
+                                              ebay_ctx.price_type)
         rec_platform, rec_confidence = recommend_platform(
             stockx_sales_7d=result.sales_last_7_days,
             stockx_sales_30d=result.sales_last_30_days,
@@ -888,6 +999,11 @@ def _evaluate_product(
             if sup_stats is not None:
                 sup_stats.cart_attempts += 1
                 sup_stats.cart_ms_total += cart.elapsed_ms or 0
+            # Definitive outcomes stamp the persisted per-size verification
+            # record — the cached-eval guard reads these next run.
+            if cart.ok or not cart.inconclusive:
+                _stamp_size_cartable(db, supplier.id, product.sku,
+                                     avail_size.size, cart.ok)
             if cart.ok:
                 confidence = CONFIDENCE_VERIFIED_CART
                 if sup_stats is not None:
@@ -1007,9 +1123,17 @@ def _evaluate_product(
 
 @dataclass
 class _EbayContext:
-    """Product-level eBay context for one evaluation. Ask stats are CURRENT
-    ACTIVE listings (price_type='active_ask'); watch_count/demand_rank are
-    soft signals. None of this is ever passed to classify_opportunity."""
+    """Product-level eBay context for one evaluation, from the tiered fetch in
+    _fetch_ebay_context. price/price_type carry whichever tier answered:
+    'sold_avg' (Tier 1, genuine realized sales — the only tier whose counts
+    may reach the sales gate) or 'active_ask' (Tier 2, CURRENT ACTIVE
+    listings). Ask stats and listing count are kept in every tier — supply
+    context is useful regardless. watch_count/demand_rank are soft signals.
+    Nothing here is ever passed to classify_opportunity."""
+    price: Optional[float] = None            # sold avg (tier 1) or median ask (tier 2)
+    price_type: Optional[str] = None         # 'sold_avg' | 'active_ask' | None
+    sales_count_7d: Optional[int] = None     # tier 1 only — None = unknown, not zero
+    sales_count_30d: Optional[int] = None
     active_listings: Optional[int] = None
     min_ask: Optional[float] = None
     median_ask: Optional[float] = None
@@ -1021,21 +1145,25 @@ class _EbayContext:
 
 def _fetch_ebay_context(ebay_client: EbayClient, product: ScrapedProduct,
                         emit: Callable) -> Optional["_EbayContext"]:
-    """Catalog-resolve the SKU (ID-based queries beat free-text), then pull
-    active-listing ask stats and the soft demand signal. Any endpoint failure
-    (403 / out-of-scope / network) has already been reduced to None inside the
-    client — this never raises into the batch."""
+    """Catalog-resolve the SKU (ID-based queries beat free-text), then run the
+    tiered pricing fetch: Tier-1 sold stats first (None until Marketplace
+    Insights is granted and enabled), active-listing ask stats always (listing
+    count is supply context in either tier), plus the soft demand signal. Any
+    endpoint failure (403 / out-of-scope / network) has already been reduced
+    to None inside the client — this never raises into the batch."""
     try:
         match = ebay_client.resolve_catalog(product.sku, product.name)
-        stats = ebay_client.get_active_listing_stats(
-            product.sku,
-            gtin=match.gtin if match else None,
-            epid=match.epid if match else None,
-        )
+        gtin = match.gtin if match else None
+        epid = match.epid if match else None
+        # Tier 1 — realized sales. Used whenever it returns data.
+        sold = ebay_client.get_sold_stats(product.sku, gtin=gtin, epid=epid)
+        # Tier 2 / supply context — fetched in both tiers: the active-listing
+        # count is a popularity signal even when sold data exists.
+        stats = ebay_client.get_active_listing_stats(product.sku, gtin=gtin, epid=epid)
         # ePID from the Catalog API when in scope, else straight from the
         # Browse search response (live-verified it carries epid).
-        epid = (match.epid if match and match.epid
-                else stats.top_epid if stats else None)
+        if not epid and stats:
+            epid = stats.top_epid
         # No item_id fallback here: under the basic client-credentials scope
         # eBay returns no watchCount anywhere (live-verified 2026-07-18), so a
         # per-SKU getItem would burn a call per product for a guaranteed None.
@@ -1044,9 +1172,19 @@ def _fetch_ebay_context(ebay_client: EbayClient, product: ScrapedProduct,
             epid=epid,
             watch_count=stats.top_watch_count if stats else None,
         )
-        if stats is None and signal is None:
+        if sold is None and stats is None and signal is None:
             return None
+        if sold is not None:
+            price, price_type = sold.avg_sold_price_30d, sold.price_type
+        elif stats is not None and stats.median_ask is not None:
+            price, price_type = stats.median_ask, stats.price_type
+        else:
+            price, price_type = None, None
         ctx = _EbayContext(
+            price=price,
+            price_type=price_type,
+            sales_count_7d=sold.sales_count_7d if sold else None,
+            sales_count_30d=sold.sales_count_30d if sold else None,
             active_listings=stats.active_count if stats else None,
             min_ask=stats.min_ask if stats else None,
             median_ask=stats.median_ask if stats else None,
@@ -1054,7 +1192,11 @@ def _fetch_ebay_context(ebay_client: EbayClient, product: ScrapedProduct,
             watch_count=signal.watch_count if signal else None,
             demand_rank=signal.demand_rank if signal else None,
         )
-        if stats and stats.median_ask:
+        if sold is not None:
+            emit(f"    [eBay]   {product.sku} → sold avg ${sold.avg_sold_price_30d:.2f} "
+                 f"({sold.sales_count_7d}/7d {sold.sales_count_30d}/30d sales)"
+                 + (f", {stats.active_count} active listing(s)" if stats else ""))
+        elif stats and stats.median_ask:
             emit(f"    [eBay]   {product.sku} → {stats.active_count} active listing(s), "
                  f"median ask ${stats.median_ask:.2f} (ask price, not sold)"
                  + (f", {ctx.watch_count} watchers" if ctx.watch_count else ""))
@@ -1221,14 +1363,33 @@ def _upsert_supplier_product(db: Session, supplier: Supplier, product: ScrapedPr
     for sz in product.sizes:
         if sz.size not in seen or sz.in_stock:
             seen[sz.size] = sz.in_stock
+
+    # Cart-verification stamps: this run's probe outcome writes them; an
+    # inconclusive/unprobed run carries the previous stamp forward, so
+    # verified_cartable_at always means "last SUCCESSFUL verification" and the
+    # TTL check in _cartable_evidence_ok stays meaningful across throttled runs.
+    prev_stamp = {
+        r.size: (r.is_cartable, r.verified_cartable_at)
+        for r in db.query(SupplierProductSize).filter_by(supplier_product_id=sp_id)
+    }
     db.query(SupplierProductSize).filter_by(supplier_product_id=sp_id).delete(
         synchronize_session=False
     )
     for size_val, in_stock in seen.items():
+        if product.cart_probe == "ok" and in_stock:
+            is_cartable, verified_at = True, now
+        elif product.cart_probe == "blocked":
+            # Definitive can't-buy: clear immediately, keep the timestamp of
+            # the last success (if any) for audit.
+            is_cartable, verified_at = False, prev_stamp.get(size_val, (None, None))[1]
+        else:
+            is_cartable, verified_at = prev_stamp.get(size_val, (None, None))
         db.add(SupplierProductSize(
             supplier_product_id=sp_id,
             size=size_val,
             in_stock=in_stock,
+            is_cartable=is_cartable,
+            verified_cartable_at=verified_at,
         ))
 
 
@@ -1392,12 +1553,14 @@ def _upsert_opportunity(db: Session, sku, shoe_name, size, supplier: Supplier,
 
 def _apply_ebay_columns(row: Opportunity, ctx: _EbayContext,
                         ref: Optional[EbayReference]):
-    """Write the eBay context onto an Opportunity row. ebay_price carries the
-    median ACTIVE ask and is always labeled via ebay_price_type='active_ask' —
-    'sold_avg' is reserved for a future Marketplace Insights integration."""
-    row.ebay_price = ref.ask if ref else ctx.median_ask
-    row.ebay_price_type = ref.price_type if ref else (
-        "active_ask" if ctx.median_ask is not None else None)
+    """Write the eBay context onto an Opportunity row. ebay_price carries
+    whichever tier answered and ebay_price_type labels it: 'sold_avg' only
+    for genuine Tier-1 realized-sale data, 'active_ask' for the median of
+    current listings — downstream consumers key off the label, never guess."""
+    row.ebay_price = ref.price if ref else ctx.price
+    row.ebay_price_type = ref.price_type if ref else ctx.price_type
+    row.ebay_sales_count_7d = ctx.sales_count_7d
+    row.ebay_sales_count_30d = ctx.sales_count_30d
     row.ebay_min_ask = ctx.min_ask
     row.ebay_max_ask = ctx.max_ask
     row.ebay_active_listings = ctx.active_listings

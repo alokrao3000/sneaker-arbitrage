@@ -52,7 +52,9 @@ class LiquiditySnapshot:
     sales_last_7_days: Optional[int] = None
     sales_last_30_days: Optional[int] = None
     last_sale_date: Optional[datetime] = None
-    source: str = "none"      # alias_live | sale_history | none
+    # alias_live | sale_history | stockx_page | stockx_api | ebay_sold | none
+    # — every non-"none" source is realized sales, never asks/watches.
+    source: str = "none"
 
     @property
     def known(self) -> bool:

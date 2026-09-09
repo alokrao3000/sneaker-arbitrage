@@ -4,8 +4,10 @@ sqlalchemy==2.0.36
 psycopg2-binary==2.9.10
 httpx==0.28.1
 playwright==1.49.0
-playwright-stealth==1.0.6
-# playwright-stealth imports pkg_resources, removed from newer setuptools
+patchright==1.61.2
+# patchright pulls pyee>=13, ahead of playwright's pyee==12.0.0 pin — both
+# packages work fine against the newer pyee at runtime (verified live), so no
+# corresponding pyee pin is needed here.
 setuptools<70
 apscheduler==3.10.4
 pydantic-settings==2.6.1

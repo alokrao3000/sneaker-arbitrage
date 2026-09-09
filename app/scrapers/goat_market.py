@@ -26,11 +26,11 @@ priceHistory/salesHistory/recentSales, and size-selector interaction. This
 means `get_sales_last_7_days()` has no real data source today, same
 unresolved gap as StockX — see stockx_market.py's docstring.
 
-Important: this page must be loaded WITHOUT playwright-stealth's patching —
-see app/scrapers/browser.py's docstring for why (stealth's navigator overrides
-crash GOAT's own bot-detection script, which breaks React hydration before
-any request fires). Construct this platform's BrowserSession with
-`use_stealth=False`.
+Historical note: this used to require BrowserSession(use_stealth=False) because
+playwright-stealth's navigator overrides crashed GOAT's own bot-detection
+script (broke React hydration before any request fired). That flag is gone —
+see app/scrapers/browser.py's docstring — patchright replaced stealth_sync
+entirely, so this conflict no longer applies to either platform.
 """
 import logging
 from dataclasses import dataclass, field

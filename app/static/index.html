@@ -456,6 +456,35 @@ function stockChip(o) {
   }
 }
 
+function ebaySectionHTML(o) {
+  // Rendered only when the pipeline has eBay context for this SKU. The price
+  // label is driven by ebay_price_type so an active-listing median can never
+  // read as a sold price; the listing count is a supply/popularity badge and
+  // deliberately styled apart from the confirmed-sales row.
+  if (o.ebay_price == null && o.ebay_active_listings == null) return '';
+  const sold = o.ebay_price_type === 'sold_avg';
+  const priceChip = sold
+    ? '<span class="chip green" style="padding:1px 7px" title="Average of realized eBay sales over the last 30 days (outlier-filtered) — genuine sold data">sold avg</span>'
+    : '<span class="chip amber" style="padding:1px 7px" title="Median of CURRENT active listings — an asking price, not evidence anything sold at it">ask · not sold</span>';
+  const fetched = o.ebay_fetched_at
+    ? ` <span title="eBay data fetched ${new Date(o.ebay_fetched_at).toLocaleString()}" style="color:var(--text-3)">●</span>` : '';
+  const rec = o.recommended_platform === 'ebay'
+    ? `<span class="chip blue" title="eBay's reference margin beats the primary platform and a demand signal exists — confidence is '${esc(o.recommendation_confidence || 'low')}' because it rests on asks/watches, not realized sales"><i class="bi bi-signpost"></i> Consider selling on eBay</span>`
+    : '';
+  return `
+    <div class="card-section">
+      <div class="section-label"><span><i class="bi bi-tag"></i> EBAY${fetched}</span>${rec}</div>
+      <div class="kv-grid">
+        ${o.ebay_price != null ? `<div class="kv"><span class="k">${sold ? 'Sold avg (30d)' : 'Median ask'}</span><span class="v">$${fmt(o.ebay_price)} ${priceChip}</span></div>` : ''}
+        ${o.ebay_active_listings != null ? `<div class="kv"><span class="k">Active listings</span><span class="v muted" title="Live listings found — a supply/popularity signal, NOT a sale count">${o.ebay_active_listings} live</span></div>` : ''}
+        ${sold && (o.ebay_sales_count_7d != null || o.ebay_sales_count_30d != null)
+          ? `<div class="kv"><span class="k">eBay sales 7d / 30d</span><span class="v">${o.ebay_sales_count_7d ?? '?'} / ${o.ebay_sales_count_30d ?? '?'}</span></div>` : ''}
+        ${o.ebay_watch_count != null ? `<div class="kv"><span class="k">Watchers</span><span class="v muted">${o.ebay_watch_count}</span></div>` : ''}
+        ${o.ebay_margin != null ? `<div class="kv"><span class="k">Est. margin</span><span class="v">$${fmt(o.ebay_margin)}${o.ebay_roi != null ? ` <span style="color:var(--text-3);font-weight:500">(${o.ebay_roi.toFixed(1)}%)</span>` : ''}</span></div>` : ''}
+      </div>
+    </div>`;
+}
+
 function renderCards(rows) {
   const wrap = document.getElementById('cards');
   setText('list-count', rows.length ? `${rows.length} result${rows.length === 1 ? '' : 's'}` : '');
@@ -535,6 +564,7 @@ function cardHTML(o) {
         <div class="kv"><span class="k">Priced from</span><span class="v">${priceType}</span></div>
       </div>
     </div>
+    ${ebaySectionHTML(o)}
 
     <div class="card-footer">
       <div class="profit-block">

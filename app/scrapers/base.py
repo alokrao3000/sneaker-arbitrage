@@ -106,7 +106,8 @@ class ScrapedProduct:
     sizes: List[ScrapedSize] = field(default_factory=list)
     published_at: Optional[datetime] = None   # when the product was listed on the source site
     image_url: Optional[str] = None           # primary product image on the source site
-    # Product-level cart probe outcome from the scrape phase (Shopify):
+    # Product-level cart probe outcome from the scrape phase (see
+    # base.verify_cartable — Shopify and Footlocker both run it):
     # "ok" | "blocked" | "inconclusive" | None (not probed / unsupported)
     cart_probe: Optional[str] = None
 
@@ -200,6 +201,65 @@ def normalize_size(raw: str) -> Optional[str]:
         return str(int(val)) if val == int(val) else str(val)
     except ValueError:
         return None
+
+
+# ── Shared cart-verification gate ─────────────────────────────────────────────
+
+async def verify_cartable(products: List["ScrapedProduct"], probe_fn,
+                          concurrency: int,
+                          stats: Optional["ScraperStats"] = None,
+                          supplier_label: str = "") -> List["ScrapedProduct"]:
+    """The hard gate between "the retailer's API says in-stock" and "you can
+    actually buy it": every product with at least one size claiming stock gets
+    one add-to-cart probe before downstream code may trust in_stock=True.
+    Catches pre-release / notify-me pages where the inventory feed reports
+    stock but sales haven't opened.
+
+    probe_fn: async (product) -> "ok" | "blocked" | "inconclusive" | None.
+      None means the product carries no cart-addable variant id, so it can't
+      be probed — cart_probe stays None and the product is left untouched.
+
+    Semantics (identical for every scraper that calls this):
+      "blocked"      → definitive can't-buy: all sizes marked in_stock=False
+      "ok"           → the store accepted the cart addition
+      "inconclusive" → throttle/network — NOT a stock verdict; sizes kept,
+                       outcome recorded so downstream confidence is honest
+
+    Probes run concurrently, bounded by `concurrency` (cart endpoints are the
+    most aggressively throttled ones a store has).
+    """
+    to_check = [p for p in products if any(s.in_stock for s in p.sizes)]
+    if not to_check:
+        return products
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _probe(product: "ScrapedProduct") -> None:
+        async with sem:
+            outcome = await probe_fn(product)
+        if outcome is None:
+            return
+        product.cart_probe = outcome
+        if stats is not None:
+            stats.cart_probes += 1
+        if outcome == "blocked":
+            if stats is not None:
+                stats.cart_probe_blocked += 1
+            # Deliberately distinct from ordinary out-of-stock logging: this
+            # is the pre-release/notify-me false-positive class (API says
+            # in-stock, cart says no) — grep for "cart-add failed" to audit.
+            logger.info(
+                f"[{supplier_label}] {product.sku} — API reported in-stock but "
+                "cart-add failed; marking unavailable (likely pre-release/notify-me)"
+            )
+            for s in product.sizes:
+                s.in_stock = False
+        elif outcome == "inconclusive":
+            if stats is not None:
+                stats.cart_probe_inconclusive += 1
+
+    await asyncio.gather(*[_probe(p) for p in to_check])
+    return products
 
 
 def rate_limit(min_sec: float = 1.5, max_sec: float = 4.0):
